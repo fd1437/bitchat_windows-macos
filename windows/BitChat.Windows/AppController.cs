@@ -26,17 +26,20 @@ public sealed partial class AppController:IAsyncDisposable
     public event Action<string,string>? Receipt;
     public AppController(StateStore store)
     {
-        Store=store;Mesh=new(store.State.NoiseKey,store.State.SigningSeed,store.State.Nickname,Bluetooth.Send){Capabilities=[0x79,0x01],IsBlocked=id=>Store.State.Blocked.Contains(id)};
+        Store=store;mediaLedger=new(Path.Combine(StateStore.Root,"media"),ProtectMediaDecision,UnprotectMediaDecision);Mesh=new(store.State.NoiseKey,store.State.SigningSeed,store.State.Nickname,Bluetooth.Send){Capabilities=[0x79,0x03],IsBlocked=id=>Store.State.Blocked.Contains(id)};
         foreach(var pair in Store.State.KnownPeers){Peers[pair.Key]=pair.Value with{LastSeen=0,Authenticated=false};Mesh.RestorePeer(pair.Value);}
         foreach(var pair in Store.State.PinnedSigningKeys)Mesh.RestorePinnedKey(pair.Key,pair.Value);
         Mesh.RestoreArchive(Store.State.GossipArchive);
         Mesh.IdentityAuthenticated+=(peer,key)=>Post(()=>{Store.State.PinnedSigningKeys[peer]=key;Store.Save();});
-        Bluetooth.Status+=s=>Status?.Invoke(s);Bluetooth.Packet+=(ingress,b)=>_=Mesh.Receive(b,ingress);Mesh.DirectNeighbors=()=>Bluetooth.DirectPeers;Mesh.IngressPeerValidated+=Bluetooth.RememberDirectPeer;Bluetooth.LinkReady+=()=>_=OnLinkReady();
+        Bluetooth.Status+=s=>Status?.Invoke(s);Bluetooth.Packet+=(ingress,b)=>_=Mesh.Receive(b,ingress);Mesh.DirectNeighbors=()=>Bluetooth.DirectPeers;Mesh.IngressPeerValidated+=(ingress,peer)=>{Bluetooth.RememberDirectPeer(ingress,peer);_=Mesh.PeerLinkReady(peer,Bluetooth.LinkEpoch(ingress));};Bluetooth.LinkReady+=()=>_=OnLinkReady();
         Mesh.Status+=s=>Status?.Invoke(s);Mesh.PeerChanged+=p=>{Peers[p.Id]=p;Post(()=>{Store.State.KnownPeers[p.Id]=p;Store.Save();});PeersChanged?.Invoke();};
         Mesh.Message+=m=>Post(()=>{if(m.IsPrivate&&HandleFavorite(m.PeerId!,m.Content))return;Add(new(m.IsPrivate?"mesh:"+m.PeerId:"mesh",m.Id,m.Sender,m.Content,m.Timestamp,Peer:m.PeerId));});
-        Mesh.Media+=(peer,media,isPrivate)=>Post(()=>
-        {var saved=Store.SaveMedia(media);Add(new(isPrivate?"mesh:"+peer:"mesh",Guid.NewGuid().ToString(),Peers.GetValueOrDefault(peer)?.Nickname??peer,media.Name,Bytes.Now,Attachment:saved,Mime:media.Mime,Peer:peer));});
-        Mesh.Receipt+=(id,status)=>Post(()=>{lock(Store.State.Messages){int i=Store.State.Messages.FindIndex(m=>m.Id==id&&m.Own);if(i>=0)Store.State.Messages[i]=Store.State.Messages[i] with{Status=status};}Store.State.Outbox.RemoveAll(p=>p.Id==id);Store.State.Outbox.RemoveAll(p=>p.Id==id);Store.Save();Receipt?.Invoke(id,status);});
+        Mesh.Media+=(peer,media,isPrivate)=>Post(()=>ReceiveRawMedia(peer,media,isPrivate));
+        Mesh.AcceptPrivateMedia=AcceptMedia;
+        foreach(string fingerprint in Store.State.PrivateMediaCapable)Mesh.RestoreMediaCapable(fingerprint);
+        Mesh.MediaCapabilityObserved+=fingerprint=>Post(()=>{Store.State.PrivateMediaCapable.Add(fingerprint);Store.Save();});
+        Mesh.Receipt+=(peer,id,status)=>Post(()=>UpdateReceipt(id,status,"mesh:"+peer));
+        Mesh.MediaTransferStatus+=(peer,id,status)=>Post(()=>UpdateReceipt(id,status,"mesh:"+peer));
         Relays.Status+=s=>Status?.Invoke(s);Relays.Received+=e=>Post(()=>OnNostr(e));
         Mesh.TypedPayload+=(peer,type,bytes)=>Post(()=>HandleTyped(peer,type,bytes));
         Mesh.Archived+=packet=>Post(()=>ArchivePacket(packet));ConfigureGateway();
@@ -83,7 +86,7 @@ public sealed partial class AppController:IAsyncDisposable
                         var pm=NostrEmbedded.PrivateMessage(embedded.Payload[1..]);if(HandleFavorite(peer,pm.Text))return;
                         Add(new("nostr:"+peer,pm.Id,Store.State.NostrPeers[peer],pm.Text,rumor.created_at*1000,Peer:peer));_=SendNostrAck(peer,pm.Id,key,false);
                     }
-                    else if(type is 2 or 3){UpdateReceipt(Bytes.Text(embedded.Payload[1..]),type==2?"read":"delivered");}
+                    else if(type is 2 or 3){UpdateNostrReceipt(peer,Bytes.Text(embedded.Payload[1..]),type==2?"read":"delivered");}
                 }
                 else Add(new("nostr:"+peer,e.id,Store.State.NostrPeers[peer],rumor.content,rumor.created_at*1000,Peer:peer));PeersChanged?.Invoke();
             }
@@ -148,8 +151,8 @@ public sealed partial class AppController:IAsyncDisposable
         if(Bluetooth.Connections==0)throw new IOException("No Bluetooth link is available");
         var file=new FileInfo(path);if(file.Length>MediaPacket.MaxBytes)throw new ArgumentException("Attachments are limited to 1 MiB.");
         string mime=file.Extension.ToLowerInvariant() switch{".jpg" or ".jpeg"=>"image/jpeg",".png"=>"image/png",".webp"=>"image/webp",".wav"=>"audio/wav",".m4a"=>"audio/mp4",_=>"application/octet-stream"};
-        var media=new MediaPacket(file.Name,mime,await File.ReadAllBytesAsync(path));await Mesh.SendMedia(media,conversation=="mesh"?null:conversation[5..]);
-        Add(new(conversation,Guid.NewGuid().ToString(),Store.State.Nickname,file.Name,Bytes.Now,true,conversation=="mesh"?"sent":"queued",Store.SaveMedia(media),mime));
+        string name=mime=="image/jpeg"?"img_"+Guid.NewGuid().ToString().ToUpperInvariant()+".jpg":mime=="audio/mp4"?"voice_"+Guid.NewGuid().ToString().ToUpperInvariant()+".m4a":file.Name;
+        await SendAttachment(conversation,new(name,mime,await File.ReadAllBytesAsync(path)));
     }
     private async Task Observe(Func<Task> action){try{await action();}catch(Exception e){Status?.Invoke(e.Message);}}
     private byte[] ReplyKey(string peer)
@@ -157,8 +160,25 @@ public sealed partial class AppController:IAsyncDisposable
     private async Task SendNostrAck(string peer,string id,byte[] key,bool read)
     {try{await Relays.Publish(PrivateEnvelope.Wrap(NostrEmbedded.Ack(id,read),key,peer));}catch(Exception e){Status?.Invoke("Private receipt: "+e.Message);}}
     public Task MarkNostrRead(string peer,string id)=>SendNostrAck(peer,id,ReplyKey(peer),true);
-    private void UpdateReceipt(string id,string status)
-    {lock(Store.State.Messages){int i=Store.State.Messages.FindIndex(m=>m.Id==id&&m.Own);if(i>=0)Store.State.Messages[i]=Store.State.Messages[i] with{Status=status};}Store.State.Outbox.RemoveAll(p=>p.Id==id);Store.Save();Receipt?.Invoke(id,status);}
+    private void UpdateNostrReceipt(string peer,string id,string status)
+    {
+        UpdateReceipt(id,status,"nostr:"+peer);
+        foreach(var mapping in Store.State.MeshNostrKeys.Where(p=>p.Value==peer))UpdateReceipt(id,status,"mesh:"+mapping.Key);
+    }
+    private void UpdateReceipt(string id,string status,string? expectedConversation=null)
+    {
+        StoredMessage? message=null;
+        lock(Store.State.Messages)
+        {
+            int i=Store.State.Messages.FindIndex(m=>m.Id==id&&m.Own&&(expectedConversation==null||m.Conversation==expectedConversation));
+            if(i<0)return;
+            message=Store.State.Messages[i];
+            if(message.Status=="read"&&status=="delivered")return;
+            Store.State.Messages[i]=message with{Status=status};
+        }
+        if(status is "read" or "delivered")Store.State.Outbox.RemoveAll(p=>p.Id==id&&message.Conversation=="mesh:"+p.Peer);
+        Store.Save();Receipt?.Invoke(id,status);
+    }
     private bool HandleFavorite(string peer,string text)
     {
         bool favorite=text.StartsWith("[FAVORITED]"),unfavorite=text.StartsWith("[UNFAVORITED]");if(!favorite&&!unfavorite)return false;

@@ -66,9 +66,10 @@ public sealed class MainWindow:Window
     private void BindController()
     {
         controller.Dispatch=action=>Ui(action);
+        controller.ConfirmLegacyMedia=peer=>Task.FromResult(MessageBox.Show(this,"This contact ("+peer+") has not proved encrypted attachment support. Send this attachment without end-to-end encryption? Nearby relays may read it. This approval applies only to this send.","Legacy attachment",MessageBoxButton.YesNo,MessageBoxImage.Warning)==MessageBoxResult.Yes);
         controller.Status+=s=>Ui(()=>{status.Text=s;network.Text=$"BLE {controller.Bluetooth.Connections} · relays {controller.Relays.Connected}";});
         controller.PeersChanged+=()=>Ui(()=>{RefreshChannels();network.Text=$"BLE {controller.Bluetooth.Connections} · relays {controller.Relays.Connected} · nearby {controller.NearbyPresence}";});controller.TimelineChanged+=()=>Ui(()=>Select(conversation));
-        controller.Message+=m=>Ui(()=>{if(!m.Own&&!IsActive&&store.State.Notifications)tray.ShowBalloonTip(5000,"BitChat · "+m.Sender,m.Text.Length>200?m.Text[..200]:m.Text,System.Windows.Forms.ToolTipIcon.Info);if(m.Conversation==conversation){Append(m);scroll.ScrollToEnd();if(!m.Own&&m.Conversation.StartsWith("mesh:"))_=controller.Mesh.SendTyped(m.Conversation[5..],Bytes.Join([2],Bytes.Utf8(m.Id)));if(!m.Own&&m.Conversation.StartsWith("nostr:"))_=controller.MarkNostrRead(m.Conversation[6..],m.Id); }else if(!m.Own)status.Text=$"New message from {m.Sender}";RefreshChannels();});
+        controller.Message+=m=>Ui(()=>{if(!m.Own&&!IsActive&&store.State.Notifications)tray.ShowBalloonTip(5000,"BitChat · "+m.Sender,m.Text.Length>200?m.Text[..200]:m.Text,System.Windows.Forms.ToolTipIcon.Info);if(m.Conversation==conversation){Append(m);scroll.ScrollToEnd();if(!m.Own&&m.Conversation.StartsWith("mesh:"))_=controller.MarkMeshRead(m);if(!m.Own&&m.Conversation.StartsWith("nostr:"))_=controller.MarkNostrRead(m.Conversation[6..],m.Id); }else if(!m.Own)status.Text=$"New message from {m.Sender}";RefreshChannels();});
         controller.Receipt+=(id,value)=>Ui(()=>{if(receiptLabels.TryGetValue(id,out var label))label.Text=value;});
     }
     private void RefreshChannels()
@@ -88,6 +89,7 @@ public sealed class MainWindow:Window
         conversation=id;title.Text=id switch{"mesh"=>"# bluetooth mesh","board"=>"⌖ mesh board",_ when id.StartsWith("mesh:")=>"@ "+(controller.Peers.GetValueOrDefault(id[5..])?.Nickname??id[5..]),_ when id.StartsWith("group:")=>"# "+store.State.Groups[id].Name,_ when id.StartsWith("nostr:")=>"@ "+store.State.NostrPeers.GetValueOrDefault(id[6..],id[6..8]),_ when id.StartsWith("notes:")=>"⌖ notes #"+id[6..],_=>"# "+id[4..]};
         messages.Children.Clear();receiptLabels.Clear();StoredMessage[] history;lock(store.State.Messages)history=store.State.Messages.Where(m=>m.Conversation==id).OrderBy(m=>m.Timestamp).TakeLast(500).ToArray();foreach(var m in history)Append(m);
         if(history.Length==0)messages.Children.Add(new TextBlock{Text=id=="mesh"?"Messages travel through nearby devices over Bluetooth LE.\nChoose a location channel to chat over Nostr relays.":"No messages yet.",Foreground=muted,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,20,0,20)});
+        foreach(var message in history.Where(m=>!m.Own&&m.Status!="read"&&m.Conversation.StartsWith("mesh:")))_=controller.MarkMeshRead(message);
         RefreshChannels();scroll.ScrollToEnd();input.Focus();
     }
     private void Append(StoredMessage m)
@@ -135,7 +137,7 @@ public sealed class MainWindow:Window
         }
     }
     private void SystemMessage(string text)=>Append(new(conversation,Guid.NewGuid().ToString(),"system",text,Bytes.Now));
-    private void ClearChat(){lock(store.State.Messages)store.State.Messages.RemoveAll(m=>m.Conversation==conversation);store.Save();Select(conversation);}
+    private async void ClearChat(){await Guard(async()=>{await controller.ClearConversation(conversation);Select(conversation);});}
     private async Task Attach(){var picker=new OpenFileDialog{Title="Send attachment (up to 1 MiB)"};if(picker.ShowDialog(this)==true)await Guard(()=>controller.SendMedia(conversation,picker.FileName));}
     private async Task PlayAudio(StoredMessage message)
     {

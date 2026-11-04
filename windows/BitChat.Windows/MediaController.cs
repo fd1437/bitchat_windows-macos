@@ -1,0 +1,132 @@
+using System.IO;
+using System.Security.Cryptography;
+using BitChat.Core;
+
+namespace BitChat.Windows;
+
+public sealed partial class AppController
+{
+    private readonly PrivateMediaLedger mediaLedger;
+    public Func<string,Task<bool>>? ConfirmLegacyMedia{get;set;}
+    private static byte[] ProtectMediaDecision(byte[] data)=>ProtectedData.Protect(data,null,DataProtectionScope.CurrentUser);
+    private static byte[] UnprotectMediaDecision(byte[] data)=>ProtectedData.Unprotect(data,null,DataProtectionScope.CurrentUser);
+
+    private Task<bool> AcceptMedia(string peer,string id,MediaPacket media)
+    {
+        var completion=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Dispatch(()=>
+        {
+            if(disposed||Store.State.Blocked.Contains(peer)){completion.TrySetResult(false);return;}
+            try
+            {
+                var decision=mediaLedger.Accept(id,media,Store.SaveMedia);
+                if(decision.Kind==MediaDecisionKind.Deleted){completion.TrySetResult(true);return;}
+                if(decision.Kind!=MediaDecisionKind.Accepted){completion.TrySetResult(false);return;}
+                DeliverStoredMedia(peer,"mesh:"+peer,id,decision.Path!,decision.Name??media.Name,decision.Mime??media.Mime);
+                completion.TrySetResult(true);
+            }
+            catch(Exception e){Status?.Invoke("Private media was not acknowledged: "+e.Message);completion.TrySetResult(false);}
+        });
+        return completion.Task;
+    }
+    private void DeliverStoredMedia(string peer,string conversation,string id,string saved,string name,string mime)
+    {
+        StoredMessage? message=null,previous=null;
+        lock(Store.State.Messages)
+        {
+            if(!Store.State.Messages.Any(m=>m.Conversation==conversation&&m.Id==id))
+            {message=new(conversation,id,Peers.GetValueOrDefault(peer)?.Nickname??peer,name,Bytes.Now,Attachment:saved,Mime:mime,Peer:peer);Store.State.Messages.Add(message);}
+            else
+            {
+                int i=Store.State.Messages.FindIndex(m=>m.Conversation==conversation&&m.Id==id&&!m.Own);
+                if(i>=0&&Store.State.Messages[i].Attachment!=saved)
+                {previous=Store.State.Messages[i];Store.State.Messages[i]=previous with{Attachment=saved,Mime=mime,Text=name,Status="received"};}
+            }
+        }
+        try{Store.Save();}
+        catch{if(message!=null)Store.State.Messages.Remove(message);if(previous!=null){int i=Store.State.Messages.FindIndex(m=>m.Conversation==conversation&&m.Id==id);if(i>=0)Store.State.Messages[i]=previous;}throw;}
+        if(message!=null)Message?.Invoke(message);
+        if(previous!=null){if(previous.Attachment!=null)try{Store.RemoveMedia(previous.Attachment);}catch{}TimelineChanged?.Invoke();}
+    }
+    public async Task MarkMeshRead(StoredMessage message)
+    {
+        if(message.Own||!message.Conversation.StartsWith("mesh:"))return;
+        if(PrivateMediaIdentity.IsStable(message.Id))
+        {
+            var decision=mediaLedger.Get(message.Id);
+            if(decision.Kind!=MediaDecisionKind.Accepted||decision.Path!=message.Attachment)return;
+        }
+        await Mesh.SendTyped(message.Conversation[5..],Bytes.Join([2],Bytes.Utf8(message.Id)));
+        int index=Store.State.Messages.FindIndex(m=>m.Conversation==message.Conversation&&m.Id==message.Id&&!m.Own);
+        if(index>=0){Store.State.Messages[index]=Store.State.Messages[index] with{Status="read"};Store.Save();}
+    }
+    private static string? VoiceBurstId(string name)
+    {
+        if(name.StartsWith("voice_",StringComparison.Ordinal)&&name.EndsWith(".m4a",StringComparison.OrdinalIgnoreCase))
+        {string id=name[6..^4];if(id.Length==16&&id.All(Uri.IsHexDigit))return id.ToLowerInvariant();}
+        return null;
+    }
+    private void ReceiveRawMedia(string peer,MediaPacket media,bool isPrivate)
+    {
+        string conversation=isPrivate?"mesh:"+peer:"mesh";
+        string id=VoiceBurstId(media.Name)??Guid.NewGuid().ToString();
+        if(VoiceBurstId(media.Name)==null&&Store.State.Messages.Any(m=>m.Id==id&&m.Conversation==conversation))return;
+        DeliverStoredMedia(peer,conversation,id,Store.SaveMedia(media),media.Name,media.Mime);
+    }
+    private void ReceiveLiveMedia(string peer,string conversation,string id,MediaPacket media)
+    {
+        var decision=mediaLedger.Get(id);
+        if(decision.Kind is MediaDecisionKind.Deleted or MediaDecisionKind.Unavailable)return;
+        if(decision.Kind==MediaDecisionKind.Accepted)
+        {DeliverStoredMedia(peer,conversation,id,decision.Path!,decision.Name??media.Name,decision.Mime??media.Mime);return;}
+        if(Store.State.Messages.Any(m=>m.Conversation==conversation&&m.Id==id))return;
+        // Live frames may be incomplete. Only the finalized file can commit a
+        // durable receipt; its arrival replaces this provisional playback file.
+        DeliverStoredMedia(peer,conversation,id,Store.SaveMedia(media),media.Name,media.Mime);
+    }
+
+    private async Task SendAttachment(string conversation,MediaPacket media)
+    {
+        string? peer=conversation=="mesh"?null:conversation[5..];bool allowLegacy=false;
+        if(peer!=null)
+        {
+            var policy=await Mesh.ResolvePrivateMediaPolicy(peer);
+            if(policy==PrivateMediaSendPolicy.LegacyRequiresConsent)
+            {
+                allowLegacy=ConfirmLegacyMedia!=null&&await ConfirmLegacyMedia(Peers.GetValueOrDefault(peer)?.Nickname??peer);
+                if(!allowLegacy)throw new IOException("Attachment canceled; this contact needs unencrypted legacy transfer consent");
+            }
+            else if(policy!=PrivateMediaSendPolicy.Encrypted)throw new IOException("Encrypted media support could not be authenticated; no attachment was sent");
+        }
+        string id=(peer==null?null:PrivateMediaIdentity.StableId(Mesh.Id,peer,media.Name))??VoiceBurstId(media.Name)??Guid.NewGuid().ToString();
+        Add(new(conversation,id,Store.State.Nickname,media.Name,Bytes.Now,true,"sending",Store.SaveMedia(media),media.Mime,peer));
+        try
+        {
+            await Mesh.SendMedia(media,peer,allowLegacy);
+            // A receipt may have raced local completion. Never downgrade it.
+            var message=Store.State.Messages.FirstOrDefault(m=>m.Own&&m.Id==id&&m.Conversation==conversation);
+            if(message?.Status=="sending")UpdateReceipt(id,peer==null?"sent":allowLegacy?"sent without encryption":PrivateMediaIdentity.IsStable(id)?"awaiting receipt":"sent",conversation);
+        }
+        catch{UpdateReceipt(id,"failed",conversation);throw;}
+    }
+
+    public async Task ClearConversation(string conversation)
+    {
+        var messages=Store.State.Messages.Where(m=>m.Conversation==conversation).ToArray();
+        var incoming=messages.Where(m=>!m.Own&&m.Attachment!=null&&PrivateMediaIdentity.IsStable(m.Id))
+            .ToDictionary(m=>m.Id,m=>m.Attachment);
+        // Commit deletion intent before touching the visible timeline or files.
+        if(incoming.Count>0&&!mediaLedger.Delete(incoming))throw new IOException("Private-media deletion could not be saved; history was preserved");
+        await Mesh.ForgetPrivateMedia(messages.Where(m=>m.Own).Select(m=>m.Id));
+        var previous=Store.State.Messages.ToList();
+        Store.State.Messages.RemoveAll(m=>m.Conversation==conversation);
+        try{Store.Save();}catch{Store.State.Messages=previous;throw;}
+        foreach(var message in messages.Where(m=>m.Attachment!=null&&!incoming.ContainsKey(m.Id)))
+        {
+            // Each ordinary media file has a fresh local UUID; shared durable
+            // receiver files are removed only through the ledger above.
+            try{Store.RemoveMedia(message.Attachment!);}catch(Exception e){Status?.Invoke("Media cleanup: "+e.Message);}
+        }
+        TimelineChanged?.Invoke();
+    }
+}

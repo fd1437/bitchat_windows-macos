@@ -31,6 +31,7 @@ public sealed class AppState
     public HashSet<string> Favorites{get;set;}=[];
     public Dictionary<string,string> NostrReplyAs{get;set;}=[];
     public Dictionary<string,string> MeshNostrKeys{get;set;}=[];
+    public HashSet<string> PrivateMediaCapable{get;set;}=[];
     public HashSet<string> FavoritedBy{get;set;}=[];
     public Dictionary<string,string> NostrPeers{get;set;}=[];
     public Dictionary<string,string> Verified{get;set;}=[];
@@ -77,10 +78,16 @@ public sealed class StateStore
     {
         string dir=Path.Combine(Root,"media");Directory.CreateDirectory(dir);
         // Keep file contents DPAPI-encrypted; only decrypt on explicit export/play.
-        string file=Path.Combine(dir,Guid.NewGuid().ToString("N")+".dpapi");File.WriteAllBytes(file,ProtectedData.Protect(media.Content,null,DataProtectionScope.CurrentUser));return file;
+        string file=Path.Combine(dir,Guid.NewGuid().ToString("N")+".dpapi");PrivateMediaLedger.AtomicWrite(file,ProtectedData.Protect(media.Content,null,DataProtectionScope.CurrentUser));return file;
     }
     public byte[] ReadMedia(string path)
     {if(!Path.GetFullPath(path).StartsWith(Path.Combine(Root,"media")+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("Invalid attachment path");return ProtectedData.Unprotect(File.ReadAllBytes(path),null,DataProtectionScope.CurrentUser);}
+    public void RemoveMedia(string path)
+    {
+        string full=Path.GetFullPath(path),parent=Path.GetDirectoryName(full)!;
+        if(!parent.Equals(Path.Combine(Root,"media"),StringComparison.OrdinalIgnoreCase)||!Guid.TryParseExact(Path.GetFileNameWithoutExtension(full),"N",out _))throw new InvalidDataException("Invalid attachment path");
+        File.Delete(full);
+    }
     public void Wipe()
     {
         lock(sync)

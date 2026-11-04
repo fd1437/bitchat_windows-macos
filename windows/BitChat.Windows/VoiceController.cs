@@ -43,11 +43,11 @@ public sealed partial class AppController
             {
                 var end=cancel?new VoicePacket(recordingBurst,voiceSequence,4,[]):new VoicePacket(recordingBurst,voiceSequence,2,Bytes.Join(Bytes.U16((ushort)(voiceSequence-1)),Bytes.U32((uint)(Bytes.Now-voiceStarted))));
                 await voicePackets.Writer.WriteAsync(end);voicePackets.Writer.TryComplete();if(voiceSender!=null)await voiceSender.WaitAsync(TimeSpan.FromSeconds(30));
-                if(!cancel)Add(new(conversation,Bytes.Hex(recordingBurst),Store.State.Nickname,note.Name,Bytes.Now,true,"sent",Store.SaveMedia(note),note.Mime));
+                if(!cancel){note=note with{Name="voice_"+Bytes.Hex(recordingBurst)+".m4a"};await SendAttachment(conversation,note);}
             }
             else if(!cancel)
             {
-                await Mesh.SendMedia(note,conversation=="mesh"?null:conversation[5..]);Add(new(conversation,Guid.NewGuid().ToString(),Store.State.Nickname,note.Name,Bytes.Now,true,"sent",Store.SaveMedia(note),note.Mime));
+                await SendAttachment(conversation,note);
             }
             Status?.Invoke(cancel?"Voice recording canceled":"Voice recording sent");
         }
@@ -77,8 +77,13 @@ public sealed partial class AppController
         {
             if(burst.Playback!=null)await burst.Playback.Complete();if(disposed)return;
             var audio=Bytes.Join(burst.Frames.Values.SelectMany(frames=>frames.Select(VoicePacket.Adts)).ToArray());if(audio.Length==0)return;
-            var note=new MediaPacket("voice-"+Bytes.Hex(burst.Id)+".aac","audio/aac",audio);string saved=Store.SaveMedia(note);
-            Post(()=>Add(new(burst.Conversation,Bytes.Hex(burst.Id),Peers.GetValueOrDefault(burst.Peer)?.Nickname??burst.Peer,note.Name,Bytes.Now,Attachment:saved,Mime:note.Mime,Peer:burst.Peer)));
+            var note=await AudioProcess.VoiceNote(audio,Bytes.Hex(burst.Id));
+            if(burst.Conversation.StartsWith("mesh:"))
+            {
+                string id=PrivateMediaIdentity.StableId(burst.Peer,Mesh.Id,note.Name)!;
+                Post(()=>ReceiveLiveMedia(burst.Peer,burst.Conversation,id,note));
+            }
+            else Post(()=>{if(!Store.State.Messages.Any(m=>m.Conversation=="mesh"&&m.Id==Bytes.Hex(burst.Id)))ReceiveRawMedia(burst.Peer,note,false);});
         }
         catch(Exception e){Status?.Invoke("Voice playback: "+e.Message);}
         finally{if(burst.Playback!=null)await burst.Playback.DisposeAsync();}

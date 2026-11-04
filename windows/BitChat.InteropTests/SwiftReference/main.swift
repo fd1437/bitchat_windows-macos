@@ -27,5 +27,17 @@ let filterIDs=(0..<100).map { Data(SHA256.hash(data:Data("id\($0)".utf8))).prefi
 let gcs=GCSFilter.buildFilter(ids:filterIDs,maxBytes:1024,targetFpr:1.0/1024)
 let unsignedBoard=BoardPostPacket(postID:Data(repeating:0x66,count:16),geohash:"u09tvw",content:"Swift board reference",authorSigningKey:key.publicKey.rawRepresentation,authorNickname:"alice",createdAt:1793740000000,expiresAt:1793826400000,flags:1,signature:Data())
 let board=BoardPostPacket(postID:unsignedBoard.postID,geohash:unsignedBoard.geohash,content:unsignedBoard.content,authorSigningKey:unsignedBoard.authorSigningKey,authorNickname:unsignedBoard.authorNickname,createdAt:unsignedBoard.createdAt,expiresAt:unsignedBoard.expiresAt,flags:unsignedBoard.flags,signature:try key.signature(for:unsignedBoard.signingBytes))
-let output:[String:Any]=["gcs":["p":gcs.p,"m":gcs.m,"data":gcs.data.base64EncodedString()],"board":BoardWire.post(board).encode().base64EncodedString(),"courier":courier,"seed":seed.base64EncodedString(),"packets":packets,"group_state":state.encode()!.base64EncodedString(),"group_message":message.base64EncodedString()]
+var output:[String:Any]=["gcs":["p":gcs.p,"m":gcs.m,"data":gcs.data.base64EncodedString()],"board":BoardWire.post(board).encode().base64EncodedString(),"courier":courier,"seed":seed.base64EncodedString(),"packets":packets,"group_state":state.encode()!.base64EncodedString(),"group_message":message.base64EncodedString()]
+
+let mediaNames = ["img_12345678-1234-1234-1234-123456789ABC.jpg", "img_été_12345678-1234-1234-1234-123456789abc.JPEG", "voice_0123456789abcdef.m4a", "voice_12345678-1234-1234-1234-123456789ABC.m4a", "voice_20261104.m4a", "img_20261104.jpg", "../img_12345678-1234-1234-1234-123456789ABC.jpg", "voice_0123456789abcdef.aac"]
+var mediaIdentities:[[String:Any]]=[]
+for name in mediaNames {
+    for sender in ["0123456789abcdef", "noise:"+String(repeating:"aa",count:32)] {
+        let recipient="fedcba9876543210"
+        let id=PrivateMediaMessageIdentity.stableID(senderPeerID:PeerID(str:sender),recipientPeerID:PeerID(str:recipient),fileName:name)
+        mediaIdentities.append(["sender":sender,"recipient":recipient,"name":name,"id":id as Any? ?? NSNull()])
+    }
+}
+output["private_media_identities"]=mediaIdentities
+
 try JSONSerialization.data(withJSONObject:output,options:[.prettyPrinted,.sortedKeys]).write(to:URL(fileURLWithPath:CommandLine.arguments[1]))

@@ -67,7 +67,7 @@ Task<int> Link(bool toB,MeshPacket p){foreach(var fragment in FragmentAssembler.
 using var alice=new MeshEngine(RandomNumberGenerator.GetBytes(32),RandomNumberGenerator.GetBytes(32),"alice",p=>Link(true,p));
 using var bob=new MeshEngine(RandomNumberGenerator.GetBytes(32),RandomNumberGenerator.GetBytes(32),"bob",p=>Link(false,p));
 var received=new List<ChatMessage>();var statuses=new List<string>();MediaPacket? receivedMedia=null;
-bob.Message+=received.Add;bob.Media+=(_,media,_)=>receivedMedia=media;alice.Receipt+=(_,status)=>statuses.Add(status);
+bob.Message+=received.Add;bob.Media+=(_,media,_)=>receivedMedia=media;alice.Receipt+=(_,_,status)=>statuses.Add(status);
 alice.Status+=s=>Console.WriteLine("Alice: "+s);bob.Status+=s=>Console.WriteLine("Bob: "+s);
 async Task Pump(){int budget=10000;while(transit.Count>0){if(--budget==0)throw new Exception("Mesh relay loop");var m=transit.Dequeue();await(m.ToB?bob:alice).Receive(m.Data);}}
 await alice.Announce();await bob.Announce();await Pump();
@@ -100,4 +100,11 @@ var referenceGcs=reference.GetProperty("gcs");var referenceIds=Enumerable.Range(
 Check(referenceFilter.P==referenceGcs.GetProperty("p").GetInt32()&&referenceFilter.M==referenceGcs.GetProperty("m").GetUInt32()&&Convert.ToBase64String(referenceFilter.Data)==referenceGcs.GetProperty("data").GetString(),"Actual Swift gossip filter bytes");
 var board=BoardPost.Decode(Convert.FromBase64String(reference.GetProperty("board").GetString()!),1793740000001);Check(board.Content=="Swift board reference"&&board.Flags==1,"Actual Swift board signature and urgent flag");Check(Convert.ToBase64String(board.Encode())==reference.GetProperty("board").GetString(),"Actual Swift board re-encoding");
 var fakeCashu="cashuA"+Convert.ToBase64String(Bytes.Utf8("{\"token\":[{\"mint\":\"https://mint.example\",\"proofs\":[{\"amount\":5}]}]}")).TrimEnd('=').Replace('+','-').Replace('/','_');Check(Cashu.Decode(fakeCashu).Amount==5,"Cashu JSON amount parsing (synthetic token)");
+Console.WriteLine($"TOTAL {passed} checks passed");
+foreach(var identity in reference.GetProperty("private_media_identities").EnumerateArray())
+{
+    string? expected=identity.GetProperty("id").ValueKind==System.Text.Json.JsonValueKind.Null?null:identity.GetProperty("id").GetString();
+    Check(PrivateMediaIdentity.StableId(identity.GetProperty("sender").GetString()!,identity.GetProperty("recipient").GetString()!,identity.GetProperty("name").GetString()!)==expected,"Actual Swift private-media stable identity: "+identity.GetProperty("name").GetString());
+}
+await PrivateMediaTests.Run(Check);
 Console.WriteLine($"TOTAL {passed} checks passed");

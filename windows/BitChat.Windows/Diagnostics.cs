@@ -19,6 +19,27 @@ public static class Diagnostics
         async Task Check(string name,Func<Task<object>> test)
         {try{checks.Add(new(name,true,(await test()).ToString()??""));}catch(Exception e){checks.Add(new(name,false,e.Message));}}
         await Check("Windows DPAPI",()=>{var clear=RandomNumberGenerator.GetBytes(32);var encrypted=ProtectedData.Protect(clear,null,DataProtectionScope.CurrentUser);if(!ProtectedData.Unprotect(encrypted,null,DataProtectionScope.CurrentUser).SequenceEqual(clear))throw new CryptographicException("DPAPI roundtrip failed");return Task.FromResult<object>("per-user encryption works");});
+        await Check("Durable private media (DPAPI)",()=>
+        {
+            string temporary=Path.Combine(Path.GetDirectoryName(reportPath)!,"bitchat-media-diagnostic-"+Guid.NewGuid().ToString("N"));string? prior=StateStore.OverrideRoot;StateStore.OverrideRoot=temporary;
+            try
+            {
+                var store=new StateStore();string mediaRoot=Path.Combine(temporary,"media");
+                byte[] Protect(byte[] bytes)=>ProtectedData.Protect(bytes,null,DataProtectionScope.CurrentUser);
+                byte[] Unprotect(byte[] bytes)=>ProtectedData.Unprotect(bytes,null,DataProtectionScope.CurrentUser);
+                const string id="media-0123456789abcdef0123456789abcdef";
+                var payload=new MediaPacket("native-media.bin","application/octet-stream",RandomNumberGenerator.GetBytes(512));
+                var ledger=new PrivateMediaLedger(mediaRoot,Protect,Unprotect);var accepted=ledger.Accept(id,payload,store.SaveMedia);
+                if(accepted.Kind!=MediaDecisionKind.Accepted||!store.ReadMedia(accepted.Path!).SequenceEqual(payload.Content))throw new IOException("Encrypted media storage failed");
+                ledger=new(mediaRoot,Protect,Unprotect);
+                if(ledger.Get(id).Path!=accepted.Path)throw new IOException("Durable media mapping did not survive restart");
+                if(!ledger.Delete(new Dictionary<string,string?>{{id,accepted.Path}})||File.Exists(accepted.Path))throw new IOException("Durable media deletion failed");
+                ledger=new(mediaRoot,Protect,Unprotect);
+                if(ledger.Get(id).Kind!=MediaDecisionKind.Deleted)throw new IOException("Deleted media could be resurrected");
+                return Task.FromResult<object>("encrypted payload, persisted receipt, restart and deletion tombstone work");
+            }
+            finally{StateStore.OverrideRoot=prior;if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
+        });
         await Check("Noise XX",()=>
         {
             using var a=new NoiseHandshake(true,RandomNumberGenerator.GetBytes(32));using var b=new NoiseHandshake(false,RandomNumberGenerator.GetBytes(32));b.Read(a.Write());a.Read(b.Write());b.Read(a.Write());var tx=a.Split();var rx=b.Split();var plain=Bytes.Utf8("native Windows cryptographic smoke test");if(!rx.Receive.Decrypt(tx.Send.Encrypt(plain)).SequenceEqual(plain))throw new CryptographicException("Noise session failed");return Task.FromResult<object>("handshake and transport work");
@@ -29,10 +50,10 @@ public static class Diagnostics
             var pcm=new byte[32000];for(int i=0;i<16000;i++)System.Buffers.Binary.BinaryPrimitives.WriteInt16LittleEndian(pcm.AsSpan(i*2), (short)(Math.Sin(i*2*Math.PI*440/16000)*12000));
             using var encoder=AudioProcess.Start(["-f","s16le","-ar","16000","-ac","1","-i","pipe:0","-c:a","aac","-b:a","16000","-f","adts","pipe:1"]);using var encoded=new MemoryStream();var errors=encoder.StandardError.ReadToEndAsync();var read=encoder.StandardOutput.BaseStream.CopyToAsync(encoded);await encoder.StandardInput.BaseStream.WriteAsync(pcm);encoder.StandardInput.Close();
             try{await Task.WhenAll(read,encoder.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(20));if(encoder.ExitCode!=0)throw new IOException(await errors);}finally{if(!encoder.HasExited)encoder.Kill(true);}
-            var aac=encoded.ToArray();if(aac.Length<100||aac[0]!=0xff)throw new InvalidDataException("AAC encoder produced invalid output");
-            using var decoder=AudioProcess.Start(["-f","aac","-i","pipe:0","-f","s16le","-ar","16000","-ac","1","pipe:1"]);using var decoded=new MemoryStream();var decodeErrors=decoder.StandardError.ReadToEndAsync();var decodeRead=decoder.StandardOutput.BaseStream.CopyToAsync(decoded);await decoder.StandardInput.BaseStream.WriteAsync(aac);decoder.StandardInput.Close();
+            var aac=encoded.ToArray();var note=await AudioProcess.VoiceNote(aac);if(!note.Mime.Equals("audio/mp4")||!note.Content.AsSpan(4,4).SequenceEqual("ftyp"u8))throw new InvalidDataException("M4A note failed");if(aac.Length<100||aac[0]!=0xff)throw new InvalidDataException("AAC encoder produced invalid output");
+            using var decoder=AudioProcess.Start(["-f","mov","-i","pipe:0","-f","s16le","-ar","16000","-ac","1","pipe:1"]);using var decoded=new MemoryStream();var decodeErrors=decoder.StandardError.ReadToEndAsync();var decodeRead=decoder.StandardOutput.BaseStream.CopyToAsync(decoded);await decoder.StandardInput.BaseStream.WriteAsync(note.Content);decoder.StandardInput.Close();
             try{await Task.WhenAll(decodeRead,decoder.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(20));if(decoder.ExitCode!=0)throw new IOException(await decodeErrors);}finally{if(!decoder.HasExited)decoder.Kill(true);}
-            if(decoded.Length<30000)throw new InvalidDataException("AAC decoder produced too little audio");return $"{aac.Length} encoded bytes, {decoded.Length} decoded PCM bytes";
+            if(decoded.Length<30000)throw new InvalidDataException("AAC decoder produced too little audio");return $"{aac.Length} AAC bytes, {note.Content.Length} M4A bytes, {decoded.Length} decoded PCM bytes";
         });
         await Check("Bundled Tor",async()=>
         {

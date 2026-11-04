@@ -19,6 +19,9 @@ public sealed class BluetoothTransport:IDisposable
     private readonly ConcurrentDictionary<ulong,byte> connecting=new();
     private readonly ConcurrentDictionary<string,PacketStream> inboundStreams=new();
     private readonly ConcurrentDictionary<string,string> directPeers=new();
+    private readonly ConcurrentDictionary<string,Guid> linkEpochs=new();
+    private readonly ConcurrentDictionary<string,byte> peripheralLinks=new();
+    public Guid LinkEpoch(string ingress)=>linkEpochs.GetOrAdd(ingress,_=>Guid.NewGuid());
     private readonly ConcurrentDictionary<string,SemaphoreSlim> clientSendGates=new();
     public byte[][] DirectPeers=>directPeers.Values.Distinct().Select(Convert.FromHexString).ToArray();
     public void RememberDirectPeer(string ingress,string peer)=>directPeers[ingress]=peer;
@@ -45,7 +48,12 @@ public sealed class BluetoothTransport:IDisposable
                 var created=await provider.Service.CreateCharacteristicAsync(CharacteristicId,parameters);
                 if(created.Error==BluetoothError.Success)
                 {
-                    local=created.Characteristic;local.WriteRequested+=OnWrite;local.SubscribedClientsChanged+=(_,_)=>LinkReady?.Invoke();
+                    local=created.Characteristic;local.WriteRequested+=OnWrite;local.SubscribedClientsChanged+=(_,_)=>
+                    {
+                        var current=local.SubscribedClients.Select(c=>c.Session.DeviceId.Id).ToHashSet();
+                        foreach(string old in peripheralLinks.Keys.Where(k=>!current.Contains(k))){peripheralLinks.TryRemove(old,out _);inboundStreams.TryRemove(old,out _);directPeers.TryRemove(old,out _);linkEpochs.TryRemove(old,out _);clientSendGates.TryRemove(old,out _);}
+                        foreach(string key in current)if(peripheralLinks.TryAdd(key,0)){linkEpochs[key]=Guid.NewGuid();LinkReady?.Invoke();}
+                    };
                     provider.StartAdvertising(new GattServiceProviderAdvertisingParameters{IsConnectable=true,IsDiscoverable=true});
                 }
                 else Status?.Invoke("GATT characteristic unavailable: "+created.Error);
@@ -74,7 +82,8 @@ public sealed class BluetoothTransport:IDisposable
             if(subscribed!=GattCommunicationStatus.Success)throw new IOException("Notification subscription failed: "+subscribed);
             if(stop.IsCancellationRequested)return;
             links[e.BluetoothAddress]=link;
-            device.ConnectionStatusChanged+=(d,_)=>{if(d.ConnectionStatus==BluetoothConnectionStatus.Disconnected&&links.TryRemove(e.BluetoothAddress,out var old)){directPeers.TryRemove(e.BluetoothAddress.ToString("x"),out var removedDirectPeer);old.Service.Dispose();old.Device.Dispose();Status?.Invoke("Bluetooth peer disconnected");}};
+            linkEpochs[e.BluetoothAddress.ToString("x")]=Guid.NewGuid();
+            device.ConnectionStatusChanged+=(d,_)=>{if(d.ConnectionStatus==BluetoothConnectionStatus.Disconnected&&links.TryRemove(e.BluetoothAddress,out var old)){directPeers.TryRemove(e.BluetoothAddress.ToString("x"),out var removedDirectPeer);linkEpochs.TryRemove(e.BluetoothAddress.ToString("x"),out var removedEpoch);old.Service.Dispose();old.Device.Dispose();Status?.Invoke("Bluetooth peer disconnected");}};
             device=null;service=null;Status?.Invoke("Bluetooth peer connected");LinkReady?.Invoke();
         }
         catch(Exception ex){Status?.Invoke("Bluetooth connection: "+ex.Message);}

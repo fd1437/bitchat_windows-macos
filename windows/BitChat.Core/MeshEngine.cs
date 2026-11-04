@@ -4,9 +4,15 @@ namespace BitChat.Core;
 
 public sealed record MeshPeer(string Id,string Nickname,byte[] NoiseKey,byte[] SigningKey,byte[] Capabilities,long LastSeen,bool Authenticated=false);
 
-public sealed class MeshEngine:IDisposable,IAsyncDisposable
+public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
 {
-    private sealed class Session(bool initiator,byte[] key){public bool Initiator=initiator;public NoiseHandshake Handshake=new(initiator,key);public NoiseCipher? Send,Receive;public long Started=Bytes.Now;public Session? Previous;public byte[]? FirstHandshake,Response;}
+    private sealed class Session(bool initiator,byte[] key)
+    {
+        public bool Initiator=initiator;public NoiseHandshake Handshake=new(initiator,key);public NoiseCipher? Send,Receive;public long Started=Bytes.Now;public Session? Previous;public byte[]? FirstHandshake,Response;
+        public Guid Generation=Guid.NewGuid();public byte[]? ProvenCapabilities;public bool ProofTimedOut,SentStateEcho;
+        public Guid? MediaRetryLinkEpoch;
+        public TaskCompletionSource<bool> Proof=new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
     private readonly byte[] noiseKey,signingSeed;
     private readonly Func<MeshPacket,Task<int>> send;
     private readonly SemaphoreSlim gate=new(1);private bool stopping;
@@ -35,7 +41,7 @@ public sealed class MeshEngine:IDisposable,IAsyncDisposable
     public event Action<MeshPeer>? PeerChanged;
     public event Action<ChatMessage>? Message;
     public event Action<string,MediaPacket,bool>? Media;
-    public event Action<string,string>? Receipt;
+    public event Action<string,string,string>? Receipt;
     public event Action<string>? Status;
     public event Action<string,byte,byte[]>? TypedPayload;
     // Capability bit 8 = private encrypted media, bit 6 = mesh diagnostics.
@@ -60,8 +66,6 @@ public sealed class MeshEngine:IDisposable,IAsyncDisposable
         if(Bytes.Utf8(text).Length>255)throw new ArgumentException("The iOS mesh private-message format accepts at most 255 UTF-8 bytes per message.");
         await SendTyped(peer,Bytes.Join([1],Announcement.Tlv(0,Bytes.Utf8(messageId)),Announcement.Tlv(1,Bytes.Utf8(text))));
     }
-    public async Task SendMedia(MediaPacket media,string? recipient=null)
-    {if(recipient==null)await send(Packet(0x22,media.Encode(),version:2));else await SendTyped(recipient,Bytes.Join([0x20],media.Encode()));}
     public async Task SendTyped(string peer,byte[] payload)
     {
         await gate.WaitAsync();try{await SendTypedLocked(peer,payload);}finally{gate.Release();}
@@ -153,7 +157,7 @@ public sealed class MeshEngine:IDisposable,IAsyncDisposable
                     case 0x10:if(peer!=null)await Handshake(peerId,p.Payload);break;
                     case 0x11:
                         if(!sessions.TryGetValue(peerId,out var session)||(session.Receive??session.Previous?.Receive) is not NoiseCipher activeReceive)return;
-                        byte[] plain;try{plain=activeReceive.Decrypt(p.Payload);}catch(CryptographicException){if(session.Send!=null&&Bytes.Now-session.Started>30000){var candidate=new Session(true,noiseKey){Previous=session};sessions[peerId]=candidate;await send(Packet(0x10,candidate.Handshake.Write(),peerId,signed:false));}throw;}if(plain.Length<1)return;await HandleTyped(peerId,plain[0],plain[1..],p.Timestamp);break;
+                        byte[] plain;try{plain=activeReceive.Decrypt(p.Payload);}catch(CryptographicException){if(session.Send!=null&&Bytes.Now-session.Started>30000){var candidate=new Session(true,noiseKey){Previous=session};sessions[peerId]=candidate;await send(Packet(0x10,candidate.Handshake.Write(),peerId,signed:false));}throw;}if(plain.Length<1)return;await HandleTyped(peerId,plain[0],plain[1..],p.Timestamp,session.Receive!=null?session:session.Previous!);break;
                     case 0x22:
                         if(peer==null||p.Signature==null||!Crypto.VerifyEd(peer.SigningKey,p.SigningBytes(),p.Signature))return;
                         Media?.Invoke(peerId,MediaPacket.Decode(p.Payload),p.Recipient!=null);break;
@@ -182,7 +186,7 @@ public sealed class MeshEngine:IDisposable,IAsyncDisposable
             if(session!=null&&session.Send==null&&!session.Initiator&&Bytes.Now-session.Started<30000)
             {if(session.FirstHandshake?.SequenceEqual(bytes)==true&&session.Response!=null)await send(Packet(0x10,session.Response,peerId,signed:false));return;}
             // Deterministic collision resolution: lower ID remains initiator.
-            if(session?.Initiator==true&&string.CompareOrdinal(Id,peerId)<0)return;
+            if(session?.Initiator==true&&session.Send==null&&string.CompareOrdinal(Id,peerId)<0)return;
             if(sessions.Count>=128&&!sessions.ContainsKey(peerId))return;var previous=session?.Send!=null?session:session?.Previous;
             session?.Handshake.Dispose();sessions[peerId]=session=new(false,noiseKey){Previous=previous,FirstHandshake=bytes.ToArray()};session.Handshake.Read(bytes);session.Response=session.Handshake.Write();await send(Packet(0x10,session.Response,peerId,signed:false));return;
         }
@@ -200,7 +204,7 @@ public sealed class MeshEngine:IDisposable,IAsyncDisposable
         if(pending.Remove(peerId,out var list))foreach(var payload in list)await SendTypedLocked(peerId,payload);
         Status?.Invoke("Encrypted session established: "+peerId);
     }
-    private async Task HandleTyped(string peer,byte type,byte[] payload,ulong timestamp)
+    private async Task HandleTyped(string peer,byte type,byte[] payload,ulong timestamp,Session session)
     {
         var known=peers.GetValueOrDefault(peer);
         if(type==1)
@@ -211,15 +215,29 @@ public sealed class MeshEngine:IDisposable,IAsyncDisposable
             if(delivered.Add(peer+id)){if(delivered.Count>20000)delivered.Remove(delivered.First());Message?.Invoke(new(id,known?.Nickname??peer,text,(long)timestamp,true,peer,Nickname));}
             await SendTypedLocked(peer,Bytes.Join([3],Bytes.Utf8(id)));
         }
-        else if(type is 2 or 3)Receipt?.Invoke(Bytes.Text(payload),type==2?"read":"delivered");
-        else if(type is 0x20 or 0x09)Media?.Invoke(peer,MediaPacket.Decode(payload),true);
+        else if(type is 2 or 3)
+        {
+            string id=Bytes.Text(payload);if(retainedMedia.TryGetValue(id,out var retained)&&retained.Peer==peer)ReleaseRetainedMedia(id);
+            Receipt?.Invoke(peer,id,type==2?"read":"delivered");
+        }
+        else if(type is 0x20 or 0x09)
+        {
+            var media=MediaPacket.Decode(payload);string? id=PrivateMediaIdentity.StableId(peer,Id,media.Name);
+            if(id!=null&&AcceptPrivateMedia!=null)
+            {if(await AcceptPrivateMedia(peer,id,media))await SendTypedLocked(peer,Bytes.Join([3],Bytes.Utf8(id)));}
+            else Media?.Invoke(peer,media,true);
+        }
         else if(type==0x21)
         {
             var r=new WireReader(payload);if(r.Byte()!=1)throw new InvalidDataException("Unsupported authenticated state");byte[]? signing=null,caps=null;
             var fields=new HashSet<byte>();while(r.Remaining>0){byte t=r.Byte();if(!fields.Add(t))throw new InvalidDataException("Duplicate authenticated state field");var b=r.Read(r.Byte());if(t==1)caps=b;else if(t==2)signing=b;}
             if(signing?.Length!=32||caps==null)throw new InvalidDataException("Invalid authenticated state");
             if(known!=null&&!signing.SequenceEqual(known.SigningKey))throw new CryptographicException("Signing identity mismatch");
-            if(known!=null){pinnedKeys[peer]=signing.ToArray();IdentityAuthenticated?.Invoke(peer,signing);known=known with{Capabilities=caps,Authenticated=true};peers[peer]=known;PeerChanged?.Invoke(known);}
+            if(!sessions.TryGetValue(peer,out var current)||current!=session||current.Send==null)return;
+            session.ProvenCapabilities=caps;session.ProofTimedOut=false;session.Proof.TrySetResult(true);
+            if(known!=null){pinnedKeys[peer]=signing.ToArray();IdentityAuthenticated?.Invoke(peer,signing);known=known with{Capabilities=caps,Authenticated=true};peers[peer]=known;PeerChanged?.Invoke(known);if(HasCapability(caps,8)){string fingerprint=Bytes.Hex(Crypto.Hash(known.NoiseKey));mediaCapable.Add(fingerprint);MediaCapabilityObserved?.Invoke(fingerprint);}}
+            if(!session.SentStateEcho){session.SentStateEcho=true;await SendTypedLocked(peer,Bytes.Join([0x21],[1],Announcement.Tlv(1,Capabilities),Announcement.Tlv(2,Crypto.PublicEd(signingSeed))));}
+            await RetryMediaLocked(peer,session,session.MediaRetryLinkEpoch??session.Generation,true);
         }
         else TypedPayload?.Invoke(peer,type,payload);
     }
@@ -239,5 +257,5 @@ public sealed class MeshEngine:IDisposable,IAsyncDisposable
     public void RestorePeer(MeshPeer peer){if(Bytes.Hex(Crypto.Hash(peer.NoiseKey)[..8])==peer.Id)peers[peer.Id]=peer with{LastSeen=0,Authenticated=false};}
     public Task<int> Leave()=>send(Packet(3,[]));
     public async ValueTask DisposeAsync(){stopping=true;await gate.WaitAsync();try{Dispose();}finally{gate.Release();}}
-    public void Dispose(){stopping=true;foreach(var s in sessions.Values){s.Handshake.Dispose();s.Send?.Dispose();s.Receive?.Dispose();s.Previous?.Send?.Dispose();s.Previous?.Receive?.Dispose();}CryptographicOperations.ZeroMemory(noiseKey);CryptographicOperations.ZeroMemory(signingSeed);}
+    public void Dispose(){stopping=true;foreach(var id in retainedMedia.Keys.ToArray())ReleaseRetainedMedia(id);foreach(var s in sessions.Values){s.Proof.TrySetCanceled();s.Handshake.Dispose();s.Send?.Dispose();s.Receive?.Dispose();s.Previous?.Send?.Dispose();s.Previous?.Receive?.Dispose();}CryptographicOperations.ZeroMemory(noiseKey);CryptographicOperations.ZeroMemory(signingSeed);}
 }

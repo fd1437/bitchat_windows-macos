@@ -84,7 +84,7 @@ public sealed partial class AppController
         if(maintaining)return;maintaining=true;
         try
         {
-            ExpireVoice();await DrainGateway();await PublishPresence();await PublishPrekeys();await DepositOutbox();
+            ExpireVoice();await Mesh.MaintainPrivateMedia();await DrainGateway();await PublishPresence();await PublishPrekeys();await DepositOutbox();
             foreach(var (id,carried) in Store.State.CourierSpool.ToArray())
             {
                 if(!carried.Envelope.Valid){Store.State.CourierSpool.Remove(id);continue;}if(Bytes.Now-carried.LastTransfer<30000)continue;

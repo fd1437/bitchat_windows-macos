@@ -8,6 +8,23 @@ namespace BitChat.Windows;
 
 public static class AudioProcess
 {
+    public static async Task<MediaPacket> VoiceNote(byte[] adts,string? burst=null)
+    {
+        string temporary=Path.Combine(Path.GetTempPath(),"bitchat-audio-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(temporary);
+        string output=Path.Combine(temporary,"note.m4a");
+        try
+        {
+            using var process=Start(["-f","aac","-i","pipe:0","-c:a","copy","-movflags","+faststart","-f","ipod",output]);
+            var errors=process.StandardError.ReadToEndAsync();
+            await process.StandardInput.BaseStream.WriteAsync(adts);process.StandardInput.Close();
+            try{await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(20));if(process.ExitCode!=0)throw new IOException(await errors);}
+            finally{if(!process.HasExited)process.Kill(true);}
+            var bytes=await File.ReadAllBytesAsync(output);
+            if(bytes.Length<12||!bytes.AsSpan(4,4).SequenceEqual("ftyp"u8))throw new InvalidDataException("AAC remux did not produce an M4A container");
+            return new("voice_"+(burst??Guid.NewGuid().ToString().ToUpperInvariant())+".m4a","audio/mp4",bytes);
+        }
+        finally{Directory.Delete(temporary,true);}
+    }
     public static Process Start(string[] args)
     {
         string path=Path.Combine(AppContext.BaseDirectory,"media","ffmpeg.exe");if(!File.Exists(path))throw new FileNotFoundException("Bundled AAC codec is missing",path);
@@ -54,7 +71,7 @@ public sealed class VoiceRecorder:IAsyncDisposable
         if(process==null)throw new InvalidOperationException("Not recording");if(!stopped){stopped=true;capture.StopRecording();pcm.Writer.TryComplete();}
         await Task.WhenAll(input!,output!).WaitAsync(TimeSpan.FromSeconds(15));await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
         if(process.ExitCode!=0)throw new IOException(await errors!);if(recording.Length==0)throw new IOException("No audio captured");
-        return new("voice-"+DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss")+".aac","audio/aac",recording.ToArray());
+        return await AudioProcess.VoiceNote(recording.ToArray());
     }
     public async ValueTask DisposeAsync()
     {

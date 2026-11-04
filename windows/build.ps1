@@ -11,7 +11,7 @@ try {
         if ($LASTEXITCODE) { throw "Publish failed: $rid" }
     }
     $compiler = Get-Command makensis -ErrorAction SilentlyContinue
-    if (!$compiler) { $compiler = Get-Item "${env:ProgramFiles(x86)}\NSIS\makensis.exe" }
-    & $compiler.Source "/DPAYLOAD=$Output" "/DOUTPUT=$(Join-Path $Output 'BitChat-Setup-unsigned.exe')" installer.nsi
+    if ($compiler) { $compilerPath = $compiler.Source } else { $compilerPath = (Get-Item "${env:ProgramFiles(x86)}\NSIS\makensis.exe").FullName }
+    & $compilerPath "/DPAYLOAD=$Output" "/DOUTPUT=$(Join-Path $Output 'BitChat-Setup-unsigned.exe')" installer.nsi
     if ($LASTEXITCODE) { throw 'NSIS packaging failed' }
 } finally { Pop-Location }

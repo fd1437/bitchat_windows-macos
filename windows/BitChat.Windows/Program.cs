@@ -57,7 +57,7 @@ public sealed class MainWindow:Window
         input.Background=panel;input.Foreground=Brushes.WhiteSmoke;input.CaretBrush=green;input.BorderBrush=new SolidColorBrush(Color.FromRgb(48,63,70));input.Padding=new Thickness(10);input.KeyDown+=async(_,e)=>{if(e.Key==Key.Enter&&(Keyboard.Modifiers&ModifierKeys.Shift)==0){e.Handled=true;await Send();}};composer.Children.Add(input);DockPanel.SetDock(composer,Dock.Bottom);main.Children.Add(composer);
         scroll=new ScrollViewer{Content=messages,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};main.Children.Add(scroll);
         try{tray.Icon=System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!);}catch{}tray.DoubleClick+=(_,_)=>{Show();WindowState=WindowState.Normal;Activate();};
-        BindController();RefreshChannels();Select("mesh");Loaded+=async(_,_)=>await Guard(()=>controller.Start());Closing+=async(_,e)=>{if(closing)return;e.Cancel=true;closing=true;await controller.DisposeAsync();tray.Visible=false;tray.Dispose();Close();};
+        Deactivated+=(_,_)=>_=controller.StopVoiceAutoplay();BindController();RefreshChannels();Select("mesh");Loaded+=async(_,_)=>await Guard(()=>controller.Start());Closing+=async(_,e)=>{if(closing)return;e.Cancel=true;closing=true;await controller.DisposeAsync();tray.Visible=false;tray.Dispose();Close();};
     }
     public async Task ShutdownDiagnostics(){closing=true;await controller.DisposeAsync();tray.Visible=false;tray.Dispose();}
     private Button Button(string text,Action action)
@@ -65,11 +65,11 @@ public sealed class MainWindow:Window
     private void Ui(Action action){if(Dispatcher.CheckAccess())action();else Dispatcher.BeginInvoke(action);}
     private void BindController()
     {
-        controller.Dispatch=action=>Ui(action);
+        controller.Dispatch=action=>Ui(action);controller.IsAppActive=()=>IsActive&&WindowState!=WindowState.Minimized;
         controller.ConfirmLegacyMedia=peer=>Task.FromResult(MessageBox.Show(this,"This contact ("+peer+") has not proved encrypted attachment support. Send this attachment without end-to-end encryption? Nearby relays may read it. This approval applies only to this send.","Legacy attachment",MessageBoxButton.YesNo,MessageBoxImage.Warning)==MessageBoxResult.Yes);
         controller.Status+=s=>Ui(()=>{status.Text=s;network.Text=$"BLE {controller.Bluetooth.Connections} · relays {controller.Relays.Connected}";});
         controller.PeersChanged+=()=>Ui(()=>{RefreshChannels();network.Text=$"BLE {controller.Bluetooth.Connections} · relays {controller.Relays.Connected} · nearby {controller.NearbyPresence}";});controller.TimelineChanged+=()=>Ui(()=>Select(conversation));
-        controller.Message+=m=>Ui(()=>{if(!m.Own&&!IsActive&&store.State.Notifications)tray.ShowBalloonTip(5000,"BitChat · "+m.Sender,m.Text.Length>200?m.Text[..200]:m.Text,System.Windows.Forms.ToolTipIcon.Info);if(m.Conversation==conversation){Append(m);scroll.ScrollToEnd();if(!m.Own&&m.Conversation.StartsWith("mesh:"))_=controller.MarkMeshRead(m);if(!m.Own&&m.Conversation.StartsWith("nostr:"))_=controller.MarkNostrRead(m.Conversation[6..],m.Id); }else if(!m.Own)status.Text=$"New message from {m.Sender}";RefreshChannels();});
+        controller.Message+=m=>Ui(()=>{if(!m.Own&&!IsActive&&store.State.Notifications){var notification=NotificationContent.ForMessage(m.Sender,m.Text,store.State.HideNotificationPreviews);tray.ShowBalloonTip(5000,notification.Title,notification.Body,System.Windows.Forms.ToolTipIcon.Info);}if(m.Conversation==conversation){Append(m);scroll.ScrollToEnd();if(!m.Own&&m.Conversation.StartsWith("mesh:"))_=controller.MarkMeshRead(m);if(!m.Own&&m.Conversation.StartsWith("nostr:"))_=controller.MarkNostrRead(m.Conversation[6..],m.Id); }else if(!m.Own)status.Text=$"New message from {m.Sender}";RefreshChannels();});
         controller.Receipt+=(id,value)=>Ui(()=>{if(receiptLabels.TryGetValue(id,out var label))label.Text=value;});
     }
     private void RefreshChannels()
@@ -119,8 +119,10 @@ public sealed class MainWindow:Window
         switch(command)
         {
             case "/help":SystemMessage("/msg name text · /who · /block name · /unblock id · /fav name · /unfav name · /slap name · /hug name · /ping name · /clear · /drop note · /pay token · /trace name · /group create|invite|remove|leave\nShift+Enter inserts a line break. Triple-click bitchat to wipe local data.");break;
+            case "/w":
             case "/who":SystemMessage(string.Join("\n",controller.Peers.Values.Select(p=>$"{p.Nickname} · {p.Id} · {(p.Authenticated?"Noise authenticated":"discovered")}")));break;
             case "/clear":ClearChat();break;
+            case "/m":
             case "/msg":if(parts.Length<3)throw new ArgumentException("Usage: /msg name text");var target=Resolve(arg);await controller.Send((target.Length==16?"mesh:":"nostr:")+target,parts[2]);break;
             case "/block":store.State.Blocked.Add(Resolve(arg));store.Save();RefreshChannels();break;
             case "/unblock":store.State.Blocked.Remove(arg);store.Save();RefreshChannels();break;
@@ -184,8 +186,11 @@ public sealed class MainWindow:Window
         p.Children.Add(new TextBlock{Text="Nostr relays · one wss:// URL per line"});var urls=new TextBox{Text=string.Join("\n",store.State.Relays),AcceptsReturn=true,Height=100,Margin=new Thickness(0,6,0,16)};p.Children.Add(urls);
         var gatewayOption=new CheckBox{Content="Share Nostr access with the nearby mesh",IsChecked=store.State.Gateway,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(gatewayOption);var bridgeOption=new CheckBox{Content="Bridge the mesh to the selected location cell",IsChecked=store.State.Bridge,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(bridgeOption);
         var torOption=new CheckBox{Content="Route Nostr through Tor (restart required)",IsChecked=store.State.UseTor,Foreground=green,Margin=new Thickness(0,0,0,12)};p.Children.Add(torOption);
+        var notificationsOption=new CheckBox{Content="Message notifications",IsChecked=store.State.Notifications,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(notificationsOption);
+        var previewsOption=new CheckBox{Content="Hide notification previews (sender, text and location)",IsChecked=store.State.HideNotificationPreviews,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(previewsOption);
+        var liveOption=new CheckBox{Content="Live push-to-talk (autoplay only while this app is active)",IsChecked=store.State.LiveVoice,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(liveOption);
         p.Children.Add(new TextBlock{Text="Keys, history and attachments are encrypted for your Windows account with DPAPI. Relay changes take effect after restarting BitChat.",TextWrapping=TextWrapping.Wrap,Foreground=muted});
-        p.Children.Add(Button("save",()=>{string n=nick.Text.Trim();if(Bytes.Utf8(n).Length is <1 or >64){MessageBox.Show(d,"Nickname must contain 1–64 UTF-8 bytes.");return;}var relays=urls.Text.Split('\n',StringSplitOptions.TrimEntries|StringSplitOptions.RemoveEmptyEntries);if(relays.Any(u=>!Uri.TryCreate(u,UriKind.Absolute,out var uri)||uri.Scheme!="wss")){MessageBox.Show(d,"Relays must use wss://");return;}store.State.Gateway=gatewayOption.IsChecked==true;store.State.Bridge=bridgeOption.IsChecked==true;_=controller.RefreshGateway();store.State.UseTor=torOption.IsChecked==true;store.State.Nickname=n;store.State.Relays=relays.ToList();controller.Mesh.Nickname=n;store.Save();_=controller.Mesh.Announce();d.Close();}));
+        p.Children.Add(Button("save",()=>{string n=nick.Text.Trim();if(Bytes.Utf8(n).Length is <1 or >64){MessageBox.Show(d,"Nickname must contain 1–64 UTF-8 bytes.");return;}var relays=urls.Text.Split('\n',StringSplitOptions.TrimEntries|StringSplitOptions.RemoveEmptyEntries);if(relays.Any(u=>!Uri.TryCreate(u,UriKind.Absolute,out var uri)||uri.Scheme!="wss")){MessageBox.Show(d,"Relays must use wss://");return;}store.State.Notifications=notificationsOption.IsChecked==true;store.State.HideNotificationPreviews=previewsOption.IsChecked==true;store.State.LiveVoice=liveOption.IsChecked==true;if(!store.State.LiveVoice)_=controller.StopVoiceAutoplay();store.State.Gateway=gatewayOption.IsChecked==true;store.State.Bridge=bridgeOption.IsChecked==true;_=controller.RefreshGateway();store.State.UseTor=torOption.IsChecked==true;store.State.Nickname=n;store.State.Relays=relays.ToList();controller.Mesh.Nickname=n;store.Save();_=controller.Mesh.Announce();d.Close();}));
         p.Children.Add(Button("view identity",ShowIdentity));p.Children.Add(Button("show verification QR",ShowQr));p.Children.Add(Button("verify peer QR / link",ScanQr));p.Children.Add(new TextBlock{Text="BitChat for Windows · unsigned development build\nSource baseline: 04995f68e470",Foreground=muted,Margin=new Thickness(0,20,0,0)});d.ShowDialog();
     }
     private Window Dialog(string name,string text)=>new(){Owner=this,Title=name,Width=650,Height=350,Background=bg,Foreground=Foreground,WindowStartupLocation=WindowStartupLocation.CenterOwner,Content=new TextBox{Text=text,IsReadOnly=true,TextWrapping=TextWrapping.Wrap,Background=bg,Foreground=Foreground,BorderThickness=new Thickness(0),Margin=new Thickness(20)}};

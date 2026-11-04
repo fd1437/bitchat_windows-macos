@@ -18,6 +18,7 @@ public sealed partial class AppController:IAsyncDisposable
     private readonly Dictionary<string,(VerificationQr Qr,byte[] Nonce,long Started)> pendingVerification=[];
     private readonly Dictionary<string,string> lastVerificationNonce=[];
     public Action<Action> Dispatch{get;set;}=action=>action();
+    public Func<bool> IsAppActive{get;set;}=()=>false;
     private bool disposed;
     private void Post(Action action){if(disposed)return;Dispatch(()=>{if(!disposed)action();});}
     public event Action<StoredMessage>? Message;

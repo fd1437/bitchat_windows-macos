@@ -108,3 +108,10 @@ foreach(var identity in reference.GetProperty("private_media_identities").Enumer
 }
 await PrivateMediaTests.Run(Check);
 Console.WriteLine($"TOTAL {passed} checks passed");
+
+var hiddenNotice=NotificationContent.ForMessage("alice @ u09tv", "secret body #u09tv");
+Check(hiddenNotice.Title=="BitChat"&&hiddenNotice.Body=="New message","Notification previews hide sender, body and geohash by default");
+var visibleNotice=NotificationContent.ForMessage("alice",new string('x',300),false);
+Check(visibleNotice.Title.Contains("alice")&&visibleNotice.Body.Length==200,"Explicit notification previews show sender and bounded body");
+Check(!LiveVoicePolicy.CanAutoplay(true,false)&&!LiveVoicePolicy.CanAutoplay(false,true)&&LiveVoicePolicy.CanAutoplay(true,true),"Live voice autoplay requires both explicit preference and foreground activity");
+Console.WriteLine($"TOTAL {passed} checks passed");

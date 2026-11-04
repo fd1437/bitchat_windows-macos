@@ -14,9 +14,11 @@ public sealed partial class AppController
         public SortedDictionary<ushort,byte[][]> Frames=[];public VoicePlayback? Playback;
     }
     private readonly Dictionary<string,InboundBurst> voiceBursts=[];
+    private readonly HashSet<VoicePlayback> voicePlaybacks=[];
     public bool IsRecording=>recorder!=null;
     public async Task BeginVoice(string conversation,bool live)
     {
+        live=live&&Store.State.LiveVoice;
         if(Bluetooth.Connections==0)throw new IOException("No Bluetooth link is available for voice");
         if(recorder!=null)throw new InvalidOperationException("A recording is already active");if(conversation!="mesh"&&!conversation.StartsWith("mesh:"))throw new InvalidOperationException("Voice recording is available in Bluetooth mesh chats");
         recordingConversation=conversation;voiceStarted=Bytes.Now;voiceSequence=1;recorder=new();
@@ -61,21 +63,27 @@ public sealed partial class AppController
         {
             if(voiceBursts.ContainsKey(key))return;if(voiceBursts.Count>=8)throw new InvalidDataException("Concurrent voice burst limit");
             var burst=new InboundBurst(peer,isPrivate?"mesh:"+peer:"mesh",packet.Burst);voiceBursts[key]=burst;
-            try{burst.Playback=new VoicePlayback();}catch(Exception e){Status?.Invoke("Audio playback unavailable: "+e.Message);}Status?.Invoke("Live voice from "+(Peers.GetValueOrDefault(peer)?.Nickname??peer));return;
+            try{if(LiveVoicePolicy.CanAutoplay(Store.State.LiveVoice,IsAppActive())){burst.Playback=new VoicePlayback();voicePlaybacks.Add(burst.Playback);}}catch(Exception e){Status?.Invoke("Audio playback unavailable: "+e.Message);}Status?.Invoke("Live voice from "+(Peers.GetValueOrDefault(peer)?.Nickname??peer));return;
         }
         if(!voiceBursts.TryGetValue(key,out var active))return;
-        if(packet.Flags==4){voiceBursts.Remove(key);if(active.Playback!=null)_=active.Playback.DisposeAsync();return;}
+        if(packet.Flags==4){voiceBursts.Remove(key);if(active.Playback!=null){voicePlaybacks.Remove(active.Playback);_=active.Playback.DisposeAsync();}return;}
         if(packet.Flags==2){voiceBursts.Remove(key);_=FinishVoice(active);return;}
+        if(!LiveVoicePolicy.CanAutoplay(Store.State.LiveVoice,IsAppActive()))_=StopVoiceAutoplay();
         var frames=packet.Frames();int size=frames.Sum(f=>f.Length+7);
-        if(active.Size+size>384*1024||Bytes.Now-active.Started>130000){voiceBursts.Remove(key);if(active.Playback!=null)_=active.Playback.DisposeAsync();return;}
+        if(active.Size+size>384*1024||Bytes.Now-active.Started>130000){voiceBursts.Remove(key);if(active.Playback!=null){voicePlaybacks.Remove(active.Playback);_=active.Playback.DisposeAsync();}return;}
         if(!active.Frames.TryAdd(packet.Sequence,frames))return;active.Size+=size;
         while(active.Frames.TryGetValue(active.Next,out var ready)){foreach(var raw in ready)active.Playback?.Add(raw);active.Next++;}
+    }
+    public async Task StopVoiceAutoplay()
+    {
+        var playback=voicePlaybacks.ToArray();voicePlaybacks.Clear();foreach(var burst in voiceBursts.Values)burst.Playback=null;
+        foreach(var player in playback)try{await player.DisposeAsync();}catch(Exception e){Status?.Invoke("Voice playback: "+e.Message);}
     }
     private async Task FinishVoice(InboundBurst burst)
     {
         try
         {
-            if(burst.Playback!=null)await burst.Playback.Complete();if(disposed)return;
+            if(burst.Playback!=null)try{await burst.Playback.Complete();}catch(Exception e){Status?.Invoke("Voice playback: "+e.Message);}if(disposed)return;
             var audio=Bytes.Join(burst.Frames.Values.SelectMany(frames=>frames.Select(VoicePacket.Adts)).ToArray());if(audio.Length==0)return;
             var note=await AudioProcess.VoiceNote(audio,Bytes.Hex(burst.Id));
             if(burst.Conversation.StartsWith("mesh:"))
@@ -86,10 +94,10 @@ public sealed partial class AppController
             else Post(()=>{if(!Store.State.Messages.Any(m=>m.Conversation=="mesh"&&m.Id==Bytes.Hex(burst.Id)))ReceiveRawMedia(burst.Peer,note,false);});
         }
         catch(Exception e){Status?.Invoke("Voice playback: "+e.Message);}
-        finally{if(burst.Playback!=null)await burst.Playback.DisposeAsync();}
+        finally{if(burst.Playback!=null){voicePlaybacks.Remove(burst.Playback);await burst.Playback.DisposeAsync();}}
     }
     private void ExpireVoice()
     {foreach(var key in voiceBursts.Where(p=>Bytes.Now-p.Value.Started>130000).Select(p=>p.Key).ToArray()){var burst=voiceBursts[key];voiceBursts.Remove(key);_=FinishVoice(burst);}}
     private async Task DisposeVoice()
-    {await EndVoice(true);foreach(var burst in voiceBursts.Values)if(burst.Playback!=null)await burst.Playback.DisposeAsync();voiceBursts.Clear();}
+    {await EndVoice(true);await StopVoiceAutoplay();voiceBursts.Clear();}
 }

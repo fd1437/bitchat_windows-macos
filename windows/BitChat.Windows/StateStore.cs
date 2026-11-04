@@ -43,6 +43,8 @@ public sealed class AppState
     public bool UseTor{get;set;}=false;
     public bool Dark{get;set;}=true;
     public bool Notifications{get;set;}=true;
+    public bool HideNotificationPreviews{get;set;}=true;
+    public bool LiveVoice{get;set;}=true;
     public byte[] LocationKey(string cell){if(!LocationKeys.TryGetValue(cell,out var k))LocationKeys[cell]=k=Schnorr.GenerateKey();return k;}
 }
 public sealed record StoredMessage(string Conversation,string Id,string Sender,string Text,long Timestamp,bool Own=false,string Status="received",string? Attachment=null,string? Mime=null,string? Peer=null);

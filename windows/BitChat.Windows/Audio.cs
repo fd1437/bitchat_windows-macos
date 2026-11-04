@@ -85,7 +85,7 @@ public sealed class VoicePlayback:IAsyncDisposable
     private readonly WaveOutEvent player=new();
     private readonly BufferedWaveProvider pcm=new(new WaveFormat(16000,16,1)){BufferDuration=TimeSpan.FromSeconds(10),DiscardOnBufferOverflow=true};
     private readonly Channel<byte[]> frames=Channel.CreateBounded<byte[]>(128);
-    private readonly Task input,output;private readonly Task<string> errors;
+    private readonly Task input,output;private readonly Task<string> errors;private int disposed;
     public VoicePlayback()
     {
         process=AudioProcess.Start(["-probesize","32","-analyzeduration","0","-f","aac","-i","pipe:0","-f","s16le","-ar","16000","-ac","1","-flush_packets","1","pipe:1"]);
@@ -93,7 +93,7 @@ public sealed class VoicePlayback:IAsyncDisposable
         input=Task.Run(async()=>{try{await foreach(var bytes in frames.Reader.ReadAllAsync())await process.StandardInput.BaseStream.WriteAsync(bytes);}finally{process.StandardInput.Close();}});
         output=Task.Run(async()=>{var bytes=new byte[4096];int n;while((n=await process.StandardOutput.BaseStream.ReadAsync(bytes))>0)pcm.AddSamples(bytes,0,n);});
     }
-    public void Add(byte[] raw){if(!frames.Writer.TryWrite(VoicePacket.Adts(raw)))throw new IOException("Live voice playback buffer is full");}
-    public async Task Complete(){frames.Writer.TryComplete();await Task.WhenAll(input,output).WaitAsync(TimeSpan.FromSeconds(10));await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));if(process.ExitCode!=0)throw new IOException(await errors);await Task.Delay(Math.Min(5000,(int)pcm.BufferedDuration.TotalMilliseconds+100));}
-    public async ValueTask DisposeAsync(){frames.Writer.TryComplete();if(!process.HasExited)process.Kill(true);try{await Task.WhenAll(input,output);}catch{}player.Dispose();process.Dispose();}
+    public void Add(byte[] raw){if(disposed!=0)return;if(!frames.Writer.TryWrite(VoicePacket.Adts(raw)))throw new IOException("Live voice playback buffer is full");}
+    public async Task Complete(){if(disposed!=0)return;frames.Writer.TryComplete();await Task.WhenAll(input,output).WaitAsync(TimeSpan.FromSeconds(10));await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));if(process.ExitCode!=0)throw new IOException(await errors);await Task.Delay(Math.Min(5000,(int)pcm.BufferedDuration.TotalMilliseconds+100));}
+    public async ValueTask DisposeAsync(){if(Interlocked.Exchange(ref disposed,1)!=0)return;frames.Writer.TryComplete();if(!process.HasExited)process.Kill(true);try{await Task.WhenAll(input,output);}catch{}player.Dispose();process.Dispose();}
 }

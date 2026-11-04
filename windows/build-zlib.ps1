@@ -11,8 +11,10 @@ $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer
 $installation = (& $vswhere -latest -products '*' -format json | ConvertFrom-Json) | Select-Object -First 1
 if (!$installation) { throw 'Visual Studio C++ build tools were not found' }
 $major = $installation.installationVersion.Split('.')[0]
-$year = $installation.catalog.productLineVersion
-$generator = "Visual Studio $major $year"
+$cmakeHelp = cmake --help | Out-String
+$generatorMatch = [regex]::Match($cmakeHelp, "Visual Studio $major [0-9]{4}")
+if (!$generatorMatch.Success) { throw "CMake has no generator for Visual Studio $major" }
+$generator = $generatorMatch.Value
 cmake -S $source -B $build -G $generator -A $arch "-DCMAKE_GENERATOR_INSTANCE=$($installation.installationPath)" -DZLIB_BUILD_TESTING=OFF -DZLIB_BUILD_STATIC=OFF -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
 if ($LASTEXITCODE) { throw 'zlib configuration failed' }
 cmake --build $build --config Release --target zlib --parallel 4

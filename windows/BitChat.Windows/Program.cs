@@ -81,6 +81,10 @@ public sealed class MainWindow:Window
         channels.Children.Add(Button("+ location channel",()=>JoinLocation()));Label("GROUPS");foreach(var g in store.State.Groups.Values)Channel(g.Conversation,"# "+g.Name);channels.Children.Add(Button("+ private group",CreateGroup));Label("NEARBY");
         foreach(var p in controller.Peers.Values.Where(p=>p.LastSeen>Bytes.Now-120000&&!store.State.Blocked.Contains(p.Id)).OrderBy(p=>p.Nickname))
         {string favorite=store.State.Favorites.Contains(p.Id)?"★ ":"";string verified=store.State.Verified.ContainsKey(Bytes.Hex(Crypto.Hash(p.NoiseKey)))?"✓ ":"";Channel("mesh:"+p.Id,$"{favorite}{verified}{(p.Authenticated?"●":"○")} {p.Nickname}");}
+        foreach(var recent in store.State.Messages.Where(m=>m.Conversation.StartsWith("mesh:")&&!store.State.Blocked.Contains(m.Conversation[5..]))
+            .GroupBy(m=>m.Conversation).Select(g=>g.OrderByDescending(m=>m.Timestamp).First()).OrderByDescending(m=>m.Timestamp))
+            if(!controller.Peers.TryGetValue(recent.Conversation[5..],out var live)||live.LastSeen<=Bytes.Now-120000)
+                Channel(recent.Conversation,"@ "+(store.State.NoiseContacts.GetValueOrDefault(recent.Conversation[5..])?.Nickname??store.State.KnownPeers.GetValueOrDefault(recent.Conversation[5..])?.Nickname??(!recent.Own?recent.Sender:recent.Conversation[5..13])));
         Label("PRIVATE MESSAGES");foreach(var p in store.State.NostrPeers.Where(p=>!store.State.Blocked.Contains(p.Key)).OrderBy(p=>p.Value))Channel("nostr:"+p.Key,"@ "+p.Value);
         channels.Children.Add(Button("+ Nostr contact",()=>NewContact()));
     }
@@ -184,7 +188,7 @@ public sealed class MainWindow:Window
         p.Children.Add(new TextBlock{Text="identity & connections",FontSize=22,Foreground=green,Margin=new Thickness(0,0,0,20)});
         p.Children.Add(new TextBlock{Text="nickname"});var nick=new TextBox{Text=store.State.Nickname,Margin=new Thickness(0,6,0,16)};p.Children.Add(nick);
         p.Children.Add(new TextBlock{Text="Nostr relays · one wss:// URL per line"});var urls=new TextBox{Text=string.Join("\n",store.State.Relays),AcceptsReturn=true,Height=100,Margin=new Thickness(0,6,0,16)};p.Children.Add(urls);
-        var gatewayOption=new CheckBox{Content="Share Nostr access with the nearby mesh",IsChecked=store.State.Gateway,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(gatewayOption);var bridgeOption=new CheckBox{Content="Bridge the mesh to the selected location cell",IsChecked=store.State.Bridge,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(bridgeOption);
+        var gatewayOption=new CheckBox{Content="Share Nostr access with the nearby mesh",IsChecked=store.State.Gateway,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(gatewayOption);var bridgeOption=new CheckBox{Content="Internet bridge (mesh and private courier drops)",IsChecked=store.State.Bridge,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(bridgeOption);
         var torOption=new CheckBox{Content="Route Nostr through Tor (restart required)",IsChecked=store.State.UseTor,Foreground=green,Margin=new Thickness(0,0,0,12)};p.Children.Add(torOption);
         var notificationsOption=new CheckBox{Content="Message notifications",IsChecked=store.State.Notifications,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(notificationsOption);
         var previewsOption=new CheckBox{Content="Hide notification previews (sender, text and location)",IsChecked=store.State.HideNotificationPreviews,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(previewsOption);

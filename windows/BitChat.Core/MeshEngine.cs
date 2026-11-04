@@ -11,6 +11,7 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
         public bool Initiator=initiator;public NoiseHandshake Handshake=new(initiator,key);public NoiseCipher? Send,Receive;public long Started=Bytes.Now;public Session? Previous;public byte[]? FirstHandshake,Response;
         public Guid Generation=Guid.NewGuid();public byte[]? ProvenCapabilities;public bool ProofTimedOut,SentStateEcho;
         public Guid? MediaRetryLinkEpoch;
+        public string? HandshakeIngress;public Guid? HandshakeEpoch,AuthenticatedEpoch,DesiredEpoch;
         public TaskCompletionSource<bool> Proof=new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
     private readonly byte[] noiseKey,signingSeed;
@@ -19,6 +20,8 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
     private readonly Dictionary<string,Session> sessions=[];
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string,byte[]> pinnedKeys=new();
     public event Action<string,byte[]>? IdentityAuthenticated;
+    public event Action<string,string,Guid,Guid>? LinkAuthenticated;
+    public event Action<string,byte[],bool>? CourierReceived;
     public void RestorePinnedKey(string peer,byte[] key)=>pinnedKeys[peer]=key.ToArray();
     private readonly Dictionary<string,List<byte[]>> pending=[];
     private readonly Dictionary<string,MeshPeer> peers=[];
@@ -115,12 +118,12 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
         {if(++count>200||packet.Payload.Length>budget)break;budget-=packet.Payload.Length;await send(packet with{Ttl=0,IsRsr=true});}
     }
     private static string Dedup(MeshPacket p)=>Bytes.Hex(Crypto.Hash(Bytes.Join(p.Sender,[p.Type],Bytes.U64(p.Timestamp),p.Payload)));
-    public async Task Receive(byte[] bytes,string? ingress=null)
+    public async Task Receive(byte[] bytes,string? ingress=null,Guid? ingressEpoch=null)
     {
         if(stopping)return;await gate.WaitAsync();
         try
         {
-            if(stopping)return;var p=MeshPacket.Decode(bytes);if(p.Type==0x20){var result=fragments.Add(p);if(result==null)return;p=result;}
+            if(stopping)return;var p=MeshPacket.Decode(bytes);bool directIngress=true;if(p.Type==0x20){var result=fragments.Add(p,ingress,ingressEpoch,out directIngress);if(result==null)return;p=result;}
             string peerId=Bytes.Hex(p.Sender);if(peerId==Id||IsBlocked(peerId)||p.Ttl>7)return;
             if(p.Timestamp>(ulong)(Bytes.Now+300000))return;
             if(p.IsRsr&&Bytes.Now-lastSyncRequest>60000)return;
@@ -148,13 +151,22 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
                     case 3:
                         if(peer==null||p.Signature==null||!Crypto.VerifyEd(peer.SigningKey,p.SigningBytes(),p.Signature))return;
                         peers.Remove(peerId);PeerChanged?.Invoke(peer with{LastSeen=0});break;
-                    case 4:if(p.Recipient!=null&&p.Recipient.SequenceEqual(PeerId)&&peer!=null&&p.Signature!=null&&Crypto.VerifyEd(peer.SigningKey,p.SigningBytes(),p.Signature))TypedPayload?.Invoke(peerId,p.Type,p.Payload);break;
+                    case 4:
+                        if(p.Recipient!=null&&p.Recipient.SequenceEqual(PeerId))
+                        {
+                            var envelope=CourierEnvelope.Decode(p.Payload);bool forMe=envelope.For(Crypto.PublicX(noiseKey));
+                            bool physical=directIngress&&p.Ttl==7&&ingressEpoch!=null&&sessions.TryGetValue(peerId,out var courierSession)
+                                &&courierSession.Send!=null&&courierSession.ProvenCapabilities!=null&&courierSession.AuthenticatedEpoch==ingressEpoch;
+                            bool signed=peer!=null&&p.Signature!=null&&Crypto.VerifyEd(peer.SigningKey,p.SigningBytes(),p.Signature);
+                            if(forMe||signed&&physical)CourierReceived?.Invoke(peerId,p.Payload,signed&&physical);
+                        }
+                        break;
                     case 0x28:
                         if(peer!=null&&p.Signature!=null&&Crypto.VerifyEd(peer.SigningKey,p.SigningBytes(),p.Signature))
                         {var fields=Tlv16.Parse(p.Payload);byte direction=fields.Require(1,1)[0];bool directed=p.Recipient!=null&&p.Recipient.SequenceEqual(PeerId);if((direction is 1 or 3)&&directed||(direction is 2 or 4)&&p.Recipient==null)TypedPayload?.Invoke(peerId,p.Type,p.Payload);}break;
                     case 0x29:if(peer!=null&&p.Signature!=null&&p.Timestamp>=(ulong)(Bytes.Now-30000)&&Crypto.VerifyEd(peer.SigningKey,p.SigningBytes(),p.Signature))TypedPayload?.Invoke(peerId,p.Type,p.Payload);break;
                     case 0x21:if(peer!=null)await RespondSync(peerId,p.Payload);break;
-                    case 0x10:if(peer!=null)await Handshake(peerId,p.Payload);break;
+                    case 0x10:await Handshake(peerId,p.Payload,p.Ttl==7&&directIngress?ingress:null,p.Ttl==7&&directIngress?ingressEpoch:null);break;
                     case 0x11:
                         if(!sessions.TryGetValue(peerId,out var session)||(session.Receive??session.Previous?.Receive) is not NoiseCipher activeReceive)return;
                         byte[] plain;try{plain=activeReceive.Decrypt(p.Payload);}catch(CryptographicException){if(session.Send!=null&&Bytes.Now-session.Started>30000){var candidate=new Session(true,noiseKey){Previous=session};sessions[peerId]=candidate;await send(Packet(0x10,candidate.Handshake.Write(),peerId,signed:false));}throw;}if(plain.Length<1)return;await HandleTyped(peerId,plain[0],plain[1..],p.Timestamp,session.Receive!=null?session:session.Previous!);break;
@@ -178,7 +190,7 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
         catch(Exception e)when(e is InvalidDataException or CryptographicException or ArgumentException or OverflowException or InvalidOperationException){Status?.Invoke("Rejected mesh packet: "+e.Message);}
         finally{gate.Release();}
     }
-    private async Task Handshake(string peerId,byte[] bytes)
+    private async Task Handshake(string peerId,byte[] bytes,string? ingress,Guid? ingressEpoch)
     {
         sessions.TryGetValue(peerId,out var session);
         if(bytes.Length==32)
@@ -188,9 +200,11 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
             // Deterministic collision resolution: lower ID remains initiator.
             if(session?.Initiator==true&&session.Send==null&&string.CompareOrdinal(Id,peerId)<0)return;
             if(sessions.Count>=128&&!sessions.ContainsKey(peerId))return;var previous=session?.Send!=null?session:session?.Previous;
-            session?.Handshake.Dispose();sessions[peerId]=session=new(false,noiseKey){Previous=previous,FirstHandshake=bytes.ToArray()};session.Handshake.Read(bytes);session.Response=session.Handshake.Write();await send(Packet(0x10,session.Response,peerId,signed:false));return;
+            session?.Handshake.Dispose();sessions[peerId]=session=new(false,noiseKey){Previous=previous,FirstHandshake=bytes.ToArray(),HandshakeIngress=ingress,HandshakeEpoch=ingressEpoch,DesiredEpoch=ingressEpoch};session.Handshake.Read(bytes);session.Response=session.Handshake.Write();await send(Packet(0x10,session.Response,peerId,signed:false));return;
         }
         if(session==null||session.Send!=null||Bytes.Now-session.Started>30000)return;
+        if(session.Initiator){session.HandshakeIngress=ingress;session.HandshakeEpoch=ingressEpoch;}
+        else if(session.HandshakeIngress!=ingress||session.HandshakeEpoch!=ingressEpoch){session.HandshakeIngress=null;session.HandshakeEpoch=null;}
         session.Handshake.Read(bytes);
         if(!session.Handshake.Complete){var response=session.Handshake.Write();await send(Packet(0x10,response,peerId,signed:false));}
         if(!session.Handshake.Complete)return;
@@ -198,6 +212,8 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
         if(Bytes.Hex(Crypto.Hash(remote)[..8])!=peerId)throw new CryptographicException("Noise peer ID mismatch");
         if(peers.TryGetValue(peerId,out var known)&&!known.NoiseKey.SequenceEqual(remote))throw new CryptographicException("Noise identity changed");
         (session.Send,session.Receive)=session.Handshake.Split();session.Previous?.Send?.Dispose();session.Previous?.Receive?.Dispose();session.Previous=null;
+        if(session.HandshakeIngress!=null&&session.HandshakeEpoch is Guid physicalEpoch)
+        {session.AuthenticatedEpoch=physicalEpoch;}
         if(known!=null){peers[peerId]=known=known with{Authenticated=true};PeerChanged?.Invoke(known);}
         var state=Bytes.Join([1],Announcement.Tlv(1,Capabilities),Announcement.Tlv(2,Crypto.PublicEd(signingSeed)));
         await SendTypedLocked(peerId,Bytes.Join([0x21],state));
@@ -232,10 +248,17 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
             var r=new WireReader(payload);if(r.Byte()!=1)throw new InvalidDataException("Unsupported authenticated state");byte[]? signing=null,caps=null;
             var fields=new HashSet<byte>();while(r.Remaining>0){byte t=r.Byte();if(!fields.Add(t))throw new InvalidDataException("Duplicate authenticated state field");var b=r.Read(r.Byte());if(t==1)caps=b;else if(t==2)signing=b;}
             if(signing?.Length!=32||caps==null)throw new InvalidDataException("Invalid authenticated state");
-            if(known!=null&&!signing.SequenceEqual(known.SigningKey))throw new CryptographicException("Signing identity mismatch");
+            if(known!=null&&!signing.SequenceEqual(known.SigningKey)||pinnedKeys.TryGetValue(peer,out var pinned)&&!signing.SequenceEqual(pinned))throw new CryptographicException("Signing identity mismatch");
             if(!sessions.TryGetValue(peer,out var current)||current!=session||current.Send==null)return;
+            if(known==null)
+            {
+                if(peers.Count>=512)throw new InvalidDataException("Peer registry is full");
+                byte[] remote=session.Handshake.RemoteStatic??throw new CryptographicException("Missing authenticated Noise identity");
+                peers[peer]=known=new(peer,peer[..8],remote,signing,caps,Bytes.Now,true);
+            }
             session.ProvenCapabilities=caps;session.ProofTimedOut=false;session.Proof.TrySetResult(true);
             if(known!=null){pinnedKeys[peer]=signing.ToArray();IdentityAuthenticated?.Invoke(peer,signing);known=known with{Capabilities=caps,Authenticated=true};peers[peer]=known;PeerChanged?.Invoke(known);if(HasCapability(caps,8)){string fingerprint=Bytes.Hex(Crypto.Hash(known.NoiseKey));mediaCapable.Add(fingerprint);MediaCapabilityObserved?.Invoke(fingerprint);}}
+            if(session.HandshakeIngress!=null&&session.AuthenticatedEpoch is Guid physicalEpoch)LinkAuthenticated?.Invoke(peer,session.HandshakeIngress,physicalEpoch,session.Generation);
             if(!session.SentStateEcho){session.SentStateEcho=true;await SendTypedLocked(peer,Bytes.Join([0x21],[1],Announcement.Tlv(1,Capabilities),Announcement.Tlv(2,Crypto.PublicEd(signingSeed))));}
             await RetryMediaLocked(peer,session,session.MediaRetryLinkEpoch??session.Generation,true);
         }

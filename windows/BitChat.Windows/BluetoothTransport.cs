@@ -13,15 +13,19 @@ public sealed class BluetoothTransport:IDisposable
 {
     public static readonly Guid ServiceId=new("F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5C");
     public static readonly Guid CharacteristicId=new("A1B2C3D4-E5F6-4A5B-8C9D-0E1F2A3B4C5D");
-    private sealed class Link(BluetoothLEDevice device,GattDeviceService service,GattCharacteristic characteristic)
-    {public BluetoothLEDevice Device=device;public GattDeviceService Service=service;public GattCharacteristic Characteristic=characteristic;public PacketStream Stream=new();public SemaphoreSlim Gate=new(1);}
+    private sealed class Link(BluetoothLEDevice device,GattDeviceService service,GattCharacteristic characteristic,Guid epoch)
+    {public Guid Epoch=epoch;public BluetoothLEDevice Device=device;public GattDeviceService Service=service;public GattCharacteristic Characteristic=characteristic;public PacketStream Stream=new();public SemaphoreSlim Gate=new(1);}
     private readonly ConcurrentDictionary<ulong,Link> links=new();
     private readonly ConcurrentDictionary<ulong,byte> connecting=new();
-    private readonly ConcurrentDictionary<string,PacketStream> inboundStreams=new();
+    private sealed class Incoming(Guid epoch){public Guid Epoch=epoch;public PacketStream Stream=new();}
+    private readonly ConcurrentDictionary<string,Incoming> inboundStreams=new();
     private readonly ConcurrentDictionary<string,string> directPeers=new();
-    private readonly ConcurrentDictionary<string,Guid> linkEpochs=new();
+    private readonly AuthenticatedLinks authenticatedLinks=new();
     private readonly ConcurrentDictionary<string,byte> peripheralLinks=new();
-    public Guid LinkEpoch(string ingress)=>linkEpochs.GetOrAdd(ingress,_=>Guid.NewGuid());
+    public Guid LinkEpoch(string ingress)=>authenticatedLinks.EnsureOpen(ingress);
+    public AuthenticatedLink[] AuthenticatedFor(string peer)=>authenticatedLinks.For(peer);
+    public (string Peer,Guid Epoch)[] DirectRoutes=>directPeers.Select(p=>(Peer:p.Value,Epoch:authenticatedLinks.Epoch(p.Key))).Where(p=>p.Epoch!=null).Select(p=>(p.Peer,p.Epoch!.Value)).ToArray();
+    public void RememberAuthenticated(string peer,string ingress,Guid epoch,Guid generation)=>authenticatedLinks.Authenticate(ingress,epoch,peer,generation);
     private readonly ConcurrentDictionary<string,SemaphoreSlim> clientSendGates=new();
     public byte[][] DirectPeers=>directPeers.Values.Distinct().Select(Convert.FromHexString).ToArray();
     public void RememberDirectPeer(string ingress,string peer)=>directPeers[ingress]=peer;
@@ -29,7 +33,7 @@ public sealed class BluetoothTransport:IDisposable
     private GattServiceProvider? provider;
     private GattLocalCharacteristic? local;
     private readonly CancellationTokenSource stop=new();
-    public event Action<string,byte[]>? Packet;
+    public event Action<string,Guid,byte[]>? Packet;
     public event Action<string>? Status;
     public event Action? LinkReady;
     public int Connections=>links.Count+(local?.SubscribedClients.Count??0);
@@ -51,8 +55,8 @@ public sealed class BluetoothTransport:IDisposable
                     local=created.Characteristic;local.WriteRequested+=OnWrite;local.SubscribedClientsChanged+=(_,_)=>
                     {
                         var current=local.SubscribedClients.Select(c=>c.Session.DeviceId.Id).ToHashSet();
-                        foreach(string old in peripheralLinks.Keys.Where(k=>!current.Contains(k))){peripheralLinks.TryRemove(old,out _);inboundStreams.TryRemove(old,out _);directPeers.TryRemove(old,out _);linkEpochs.TryRemove(old,out _);clientSendGates.TryRemove(old,out _);}
-                        foreach(string key in current)if(peripheralLinks.TryAdd(key,0)){linkEpochs[key]=Guid.NewGuid();LinkReady?.Invoke();}
+                        foreach(string old in peripheralLinks.Keys.Where(k=>!current.Contains(k))){peripheralLinks.TryRemove(old,out _);inboundStreams.TryRemove(old,out _);directPeers.TryRemove(old,out _);authenticatedLinks.Close(old);clientSendGates.TryRemove(old,out _);}
+                        foreach(string key in current)if(peripheralLinks.TryAdd(key,0)){authenticatedLinks.Open(key);LinkReady?.Invoke();}
                     };
                     provider.StartAdvertising(new GattServiceProviderAdvertisingParameters{IsConnectable=true,IsDiscoverable=true});
                 }
@@ -68,7 +72,7 @@ public sealed class BluetoothTransport:IDisposable
     private async void OnAdvertisement(BluetoothLEAdvertisementWatcher sender,BluetoothLEAdvertisementReceivedEventArgs e)
     {
         if(stop.IsCancellationRequested||links.ContainsKey(e.BluetoothAddress)||!connecting.TryAdd(e.BluetoothAddress,0))return;
-        BluetoothLEDevice? device=null;GattDeviceService? service=null;
+        BluetoothLEDevice? device=null;GattDeviceService? service=null;Guid? openedEpoch=null;
         try
         {
             device=await BluetoothLEDevice.FromBluetoothAddressAsync(e.BluetoothAddress);if(device==null)return;
@@ -76,70 +80,91 @@ public sealed class BluetoothTransport:IDisposable
             if(services.Status!=GattCommunicationStatus.Success||services.Services.Count==0)return;service=services.Services[0];
             var chars=await service.GetCharacteristicsForUuidAsync(CharacteristicId,BluetoothCacheMode.Uncached);
             if(chars.Status!=GattCommunicationStatus.Success||chars.Characteristics.Count==0)return;
-            var characteristic=chars.Characteristics[0];var link=new Link(device,service,characteristic);
-            characteristic.ValueChanged+=(_,ev)=>Receive(link.Stream,BytesFrom(ev.CharacteristicValue),e.BluetoothAddress.ToString("x"));
+            var characteristic=chars.Characteristics[0];openedEpoch=authenticatedLinks.Open(e.BluetoothAddress.ToString("x"));var link=new Link(device,service,characteristic,openedEpoch.Value);
+            characteristic.ValueChanged+=(_,ev)=>Receive(link.Stream,BytesFrom(ev.CharacteristicValue),e.BluetoothAddress.ToString("x"),link.Epoch);
             var subscribed=await characteristic.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify);
             if(subscribed!=GattCommunicationStatus.Success)throw new IOException("Notification subscription failed: "+subscribed);
             if(stop.IsCancellationRequested)return;
             links[e.BluetoothAddress]=link;
-            linkEpochs[e.BluetoothAddress.ToString("x")]=Guid.NewGuid();
-            device.ConnectionStatusChanged+=(d,_)=>{if(d.ConnectionStatus==BluetoothConnectionStatus.Disconnected&&links.TryRemove(e.BluetoothAddress,out var old)){directPeers.TryRemove(e.BluetoothAddress.ToString("x"),out var removedDirectPeer);linkEpochs.TryRemove(e.BluetoothAddress.ToString("x"),out var removedEpoch);old.Service.Dispose();old.Device.Dispose();Status?.Invoke("Bluetooth peer disconnected");}};
+            device.ConnectionStatusChanged+=(d,_)=>
+            {
+                if(d.ConnectionStatus==BluetoothConnectionStatus.Disconnected&&((ICollection<KeyValuePair<ulong,Link>>)links).Remove(new(e.BluetoothAddress,link)))
+                {directPeers.TryRemove(e.BluetoothAddress.ToString("x"),out var removedDirectPeer);authenticatedLinks.Close(e.BluetoothAddress.ToString("x"),link.Epoch);link.Service.Dispose();link.Device.Dispose();Status?.Invoke("Bluetooth peer disconnected");}
+            };
             device=null;service=null;Status?.Invoke("Bluetooth peer connected");LinkReady?.Invoke();
         }
         catch(Exception ex){Status?.Invoke("Bluetooth connection: "+ex.Message);}
-        finally{service?.Dispose();device?.Dispose();connecting.TryRemove(e.BluetoothAddress,out _);}
+        finally{if(device!=null&&openedEpoch!=null)authenticatedLinks.Close(e.BluetoothAddress.ToString("x"),openedEpoch);service?.Dispose();device?.Dispose();connecting.TryRemove(e.BluetoothAddress,out _);}
     }
     private async void OnWrite(GattLocalCharacteristic sender,GattWriteRequestedEventArgs args)
     {
-        using var deferral=args.GetDeferral();
+        string key=args.Session.DeviceId.Id;Guid epoch=authenticatedLinks.EnsureOpen(key);using var deferral=args.GetDeferral();
         try
         {
             var request=await args.GetRequestAsync();if(request==null)return;
-            var key=args.Session.DeviceId.Id;var stream=inboundStreams.GetOrAdd(key,_=>new());Receive(stream,BytesFrom(request.Value),key);
+            var state=inboundStreams.AddOrUpdate(key,_=>new(epoch),(_,old)=>old.Epoch==epoch?old:new(epoch));Receive(state.Stream,BytesFrom(request.Value),key,epoch);
             if(request.Option==GattWriteOption.WriteWithResponse)request.Respond();
         }
         catch(Exception e){Status?.Invoke("Bluetooth write: "+e.Message);}
     }
-    private void Receive(PacketStream stream,byte[] bytes,string ingress)
+    private void Receive(PacketStream stream,byte[] bytes,string ingress,Guid epoch)
     {
-        try{lock(stream){foreach(var frame in stream.Add(bytes))Packet?.Invoke(ingress,frame);}}catch(Exception e){Status?.Invoke("Rejected BLE frame: "+e.Message);}
+        try{lock(stream){foreach(var frame in stream.Add(bytes))Packet?.Invoke(ingress,epoch,frame);}}catch(Exception e){Status?.Invoke("Rejected BLE frame: "+e.Message);}
     }
     public async Task<int> Send(MeshPacket packet)
     {
-        int successes=0;
-        foreach(var link in links.Values)
-        {
-            await link.Gate.WaitAsync(stop.Token);
-            try
-            {
-                // Fragment each wire frame to the GATT value limit rather than
-                // splitting a write request into an ambiguous byte stream.
-                int mtu=Math.Min(512,Math.Max(64,(int)link.Service.Session.MaxPduSize-3));
-                foreach(var part in FragmentAssembler.Split(packet,mtu))
-                {
-                    var status=await link.Characteristic.WriteValueAsync(Buffer(part.Encode(part.Type is 0x10 or 0x11)),GattWriteOption.WriteWithResponse);
-                    if(status!=GattCommunicationStatus.Success)throw new IOException(status.ToString());
-                    if(part.Type==0x20)await Task.Delay(12,stop.Token);
-                }
-                successes++;
-            }
-            catch(Exception e){Status?.Invoke("BLE send: "+e.Message);}
-            finally{link.Gate.Release();}
-        }
-        if(local!=null)
-        {
-            foreach(var client in local.SubscribedClients.ToArray())
-            {
-                try
-                {
-                    int mtu=Math.Min(512,Math.Max(20,(int)client.Session.MaxPduSize-3));var clientGate=clientSendGates.GetOrAdd(client.Session.DeviceId.Id,_=>new(1));await clientGate.WaitAsync(stop.Token);
-                    try{foreach(var part in FragmentAssembler.Split(packet,512))
-                    {var encoded=part.Encode(part.Type is 0x10 or 0x11);for(int offset=0;offset<encoded.Length;offset+=mtu)await local.NotifyValueAsync(Buffer(encoded.Skip(offset).Take(mtu).ToArray()),client);if(part.Type==0x20)await Task.Delay(12,stop.Token);}successes++;}finally{clientGate.Release();}
-                }
-                catch(Exception e){Status?.Invoke("BLE notify: "+e.Message);}
-            }
-        }
-        return successes;
+        int count=0;foreach(var link in links.Values)if(await SendCentral(link,packet))count++;
+        if(local!=null)foreach(var client in local.SubscribedClients.ToArray())if(await SendPeripheral(client,packet))count++;
+        return count;
     }
-    public void Dispose(){stop.Cancel();watcher?.Stop();provider?.StopAdvertising();foreach(var link in links.Values){link.Service.Dispose();link.Device.Dispose();}links.Clear();}
+    public async Task<int> SendDirect(MeshPacket packet,AuthenticatedLink lease)
+    {
+        bool Valid()=>authenticatedLinks.Current(lease);
+        if(!Valid())return 0;
+        foreach(var pair in links)
+            if(pair.Key.ToString("x")==lease.Ingress&&pair.Value.Epoch==lease.Epoch)return await SendCentral(pair.Value,packet,Valid)?1:0;
+        var client=local?.SubscribedClients.FirstOrDefault(c=>c.Session.DeviceId.Id==lease.Ingress);
+        return client!=null&&await SendPeripheral(client,packet,Valid)?1:0;
+    }
+    private async Task<bool> SendCentral(Link link,MeshPacket packet,Func<bool>? stillValid=null)
+    {
+        await link.Gate.WaitAsync(stop.Token);
+        try
+        {
+            int mtu=Math.Min(512,Math.Max(64,(int)link.Service.Session.MaxPduSize-3));
+            foreach(var part in FragmentAssembler.Split(packet,mtu))
+            {
+                if(stillValid!=null&&!stillValid())return false;
+                var status=await link.Characteristic.WriteValueAsync(Buffer(part.Encode(part.Type is 0x10 or 0x11)),GattWriteOption.WriteWithResponse);
+                if(status!=GattCommunicationStatus.Success)throw new IOException(status.ToString());
+                if(part.Type==0x20)await Task.Delay(12,stop.Token);
+            }
+            return stillValid==null||stillValid();
+        }
+        catch(Exception e){Status?.Invoke("BLE send: "+e.Message);return false;}
+        finally{link.Gate.Release();}
+    }
+    private async Task<bool> SendPeripheral(GattSubscribedClient client,MeshPacket packet,Func<bool>? stillValid=null)
+    {
+        var clientGate=clientSendGates.GetOrAdd(client.Session.DeviceId.Id,_=>new(1));await clientGate.WaitAsync(stop.Token);
+        try
+        {
+            int mtu=Math.Min(512,Math.Max(20,(int)client.Session.MaxPduSize-3));
+            foreach(var part in FragmentAssembler.Split(packet,512))
+            {
+                var encoded=part.Encode(part.Type is 0x10 or 0x11);
+                for(int offset=0;offset<encoded.Length;offset+=mtu)
+                {
+                    if(stillValid!=null&&!stillValid())return false;
+                    var result=await local!.NotifyValueAsync(Buffer(encoded.Skip(offset).Take(mtu).ToArray()),client);
+                    if(result.Status!=GattCommunicationStatus.Success)throw new IOException(result.Status.ToString());
+                }
+                if(part.Type==0x20)await Task.Delay(12,stop.Token);
+            }
+            return stillValid==null||stillValid();
+        }
+        catch(Exception e){Status?.Invoke("BLE notify: "+e.Message);return false;}
+        finally{clientGate.Release();}
+    }
+    public void Dispose(){stop.Cancel();watcher?.Stop();provider?.StopAdvertising();foreach(var link in links.Values){link.Service.Dispose();link.Device.Dispose();}links.Clear();foreach(string ingress in directPeers.Keys)authenticatedLinks.Close(ingress);directPeers.Clear();}
 }

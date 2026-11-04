@@ -115,3 +115,6 @@ var visibleNotice=NotificationContent.ForMessage("alice",new string('x',300),fal
 Check(visibleNotice.Title.Contains("alice")&&visibleNotice.Body.Length==200,"Explicit notification previews show sender and bounded body");
 Check(!LiveVoicePolicy.CanAutoplay(true,false)&&!LiveVoicePolicy.CanAutoplay(false,true)&&LiveVoicePolicy.CanAutoplay(true,true),"Live voice autoplay requires both explicit preference and foreground activity");
 Console.WriteLine($"TOTAL {passed} checks passed");
+
+await BridgeCourierTests.Run(Check,reference);
+Console.WriteLine($"TOTAL {passed} checks passed");

@@ -40,4 +40,12 @@ for name in mediaNames {
 }
 output["private_media_identities"]=mediaIdentities
 
+
+let dropNow=Date(timeIntervalSince1970:1793750000)
+let dropTag=CourierEnvelope.recipientTag(noiseStaticKey:courierRecipient.publicKey.rawRepresentation,epochDay:CourierEnvelope.epochDay(for:dropNow))
+let dropEnvelope=CourierEnvelope(recipientTag:dropTag,expiry:UInt64((dropNow.timeIntervalSince1970+3600)*1000),ciphertext:courierCipher,copies:1)
+let dropBytes=dropEnvelope.encode()!
+let dropIdentity=try NostrIdentity(privateKeyData:Data(repeating:0x13,count:32))
+let dropEvent=try NostrProtocol.createCourierDropEvent(envelope:dropBytes,recipientTagHex:dropTag.hexEncodedString(),expiresAt:dropNow.addingTimeInterval(3600),senderIdentity:dropIdentity)
+output["bridge_drop"]=["now_ms":Int64(dropNow.timeIntervalSince1970*1000),"envelope":dropBytes.base64EncodedString(),"event":try dropEvent.jsonString(),"sender_key":SwiftBridgeIdentity.fixture("bridge-été-001",courierRecipient.publicKey.rawRepresentation),"recipient_public":courierRecipient.publicKey.rawRepresentation.base64EncodedString()]
 try JSONSerialization.data(withJSONObject:output,options:[.prettyPrinted,.sortedKeys]).write(to:URL(fileURLWithPath:CommandLine.arguments[1]))

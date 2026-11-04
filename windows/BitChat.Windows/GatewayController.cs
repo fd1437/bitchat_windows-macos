@@ -19,7 +19,7 @@ public sealed partial class AppController
         byte caps=0x79;if(Store.State.Gateway)caps|=4;if(Store.State.Bridge&&Geohash.Valid(Store.State.Cell))caps|=128;
         Mesh.Capabilities=[caps,3];Mesh.BridgeCell=(caps&128)!=0?Store.State.Cell:null;_=Mesh.Announce();
     }
-    public async Task RefreshGateway(){ConfigureGateway();await SubscribeBridge();Store.Save();}
+    public async Task RefreshGateway(){ConfigureGateway();await SubscribeBridge();await RefreshCourierBridge(true);Store.Save();}
     private async Task SubscribeBridge()
     {
         if(!Store.State.Bridge||!Geohash.Valid(Store.State.Cell)){await Relays.Unsubscribe("bridge");return;}

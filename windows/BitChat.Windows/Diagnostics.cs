@@ -40,6 +40,35 @@ public static class Diagnostics
             }
             finally{StateStore.OverrideRoot=prior;if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
         });
+        await Check("Durable bridge courier inbox (DPAPI)",async()=>
+        {
+            string temporary=Path.Combine(Path.GetDirectoryName(reportPath)!,"bitchat-courier-diagnostic-"+Guid.NewGuid().ToString("N"));string? prior=StateStore.OverrideRoot;StateStore.OverrideRoot=temporary;
+            try
+            {
+                var store=new StateStore();byte[] sender=RandomNumberGenerator.GetBytes(32);string peer=Bytes.Hex(Crypto.Hash(Crypto.PublicX(sender)))[..16];
+                const string id="native-offline-courier";
+                byte[] Payload(string messageId,string text)=>Bytes.Join([1],Announcement.Tlv(0,Bytes.Utf8(messageId)),Announcement.Tlv(1,Bytes.Utf8(text)));
+                var envelope=CourierEnvelope.Seal(Payload(id,"offline courier"),sender,Crypto.PublicX(store.State.NoiseKey));
+                await using(var controller=new AppController(store))
+                {
+                    if(!controller.OpenCourierEnvelope(envelope)||!controller.OpenCourierEnvelope(envelope)||store.State.Messages.Count!=1)throw new IOException("Courier inbox failed or duplicated");
+                    var control=CourierEnvelope.Seal(Payload("native-favorite","[FAVORITED]"),sender,Crypto.PublicX(store.State.NoiseKey));
+                    if(!controller.OpenCourierEnvelope(control)||!store.State.FavoritedBy.Contains(peer)||store.State.Messages.Count!=1)throw new IOException("Courier control did not commit atomically");
+                }
+                store=new StateStore();
+                await using(var restarted=new AppController(store))
+                {
+                    if(!restarted.OpenCourierEnvelope(envelope)||store.State.Messages.Count!=1||!store.State.NoiseContacts[peer].Key.SequenceEqual(Crypto.PublicX(sender)))throw new IOException("Offline sender/contact/dedup did not survive restart");
+                    uint prekeyId=42;byte[] secret=RandomNumberGenerator.GetBytes(32);
+                    var prekeyEnvelope=CourierEnvelope.Seal(Payload("native-prekey","prekey courier"),sender,Crypto.PublicX(store.State.NoiseKey),new(prekeyId,Crypto.PublicX(secret)));
+                    if(restarted.OpenCourierEnvelope(prekeyEnvelope))throw new IOException("Missing prekey was consumed");
+                    store.State.LocalPrekeys[prekeyId]=new(secret);store.Save();
+                    if(!restarted.OpenCourierEnvelope(prekeyEnvelope)||store.State.LocalPrekeys[prekeyId].Consumed==null||store.State.Messages.Count!=2)throw new IOException("Prekey retry failed");
+                }
+                return "unknown offline sender, durable contact/dedup, favorite control and missing-prekey retry work";
+            }
+            finally{StateStore.OverrideRoot=prior;if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
+        });
         await Check("Noise XX",()=>
         {
             using var a=new NoiseHandshake(true,RandomNumberGenerator.GetBytes(32));using var b=new NoiseHandshake(false,RandomNumberGenerator.GetBytes(32));b.Read(a.Write());a.Read(b.Write());b.Read(a.Write());var tx=a.Split();var rx=b.Split();var plain=Bytes.Utf8("native Windows cryptographic smoke test");if(!rx.Receive.Decrypt(tx.Send.Encrypt(plain)).SequenceEqual(plain))throw new CryptographicException("Noise session failed");return Task.FromResult<object>("handshake and transport work");

@@ -18,6 +18,8 @@ public sealed class AppState
     public Dictionary<string,PrekeyBundle> PrekeyBundles{get;set;}=[];
     public Dictionary<string,CarriedEnvelope> CourierSpool{get;set;}=[];
     public HashSet<string> OpenedCourierIds{get;set;}=[];
+    public BridgeDropSnapshot BridgeDrops{get;set;}=BridgeDropSnapshot.Empty();
+    public Dictionary<string,NoiseContact> NoiseContacts{get;set;}=[];
     public List<PendingPrivate> Outbox{get;set;}=[];
     public Dictionary<string,MeshPeer> KnownPeers{get;set;}=[];
     public Dictionary<string,List<Vouch>> Vouches{get;set;}=[];

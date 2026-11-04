@@ -68,7 +68,7 @@ Section "BitChat" SecMain
   CreateShortCut "$DESKTOP\BitChat.lnk" "$INSTDIR\BitChat.exe"
   WriteRegStr HKCU "Software\BitChat" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\BitChat" "DisplayName" "BitChat for Windows"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\BitChat" "DisplayVersion" "0.1.2"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\BitChat" "DisplayVersion" "0.1.3"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\BitChat" "Publisher" "BitChat community port"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\BitChat" "DisplayIcon" "$INSTDIR\BitChat.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\BitChat" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'

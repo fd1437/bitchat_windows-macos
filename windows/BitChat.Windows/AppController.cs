@@ -27,21 +27,21 @@ public sealed partial class AppController:IAsyncDisposable
     public event Action<string,string>? Receipt;
     public AppController(StateStore store)
     {
-        Store=store;mediaLedger=new(Path.Combine(StateStore.Root,"media"),ProtectMediaDecision,UnprotectMediaDecision);Mesh=new(store.State.NoiseKey,store.State.SigningSeed,store.State.Nickname,Bluetooth.Send){Capabilities=[0x79,0x03],IsBlocked=id=>Store.State.Blocked.Contains(id)};
+        Store=store;bridgeCourier=new(store.State.BridgeDrops,snapshot=>Post(()=>{if(snapshot.Revision>=Store.State.BridgeDrops.Revision){Store.State.BridgeDrops=snapshot;Store.Save();}}));ConfigureCourierBridge();mediaLedger=new(Path.Combine(StateStore.Root,"media"),ProtectMediaDecision,UnprotectMediaDecision);Mesh=new(store.State.NoiseKey,store.State.SigningSeed,store.State.Nickname,Bluetooth.Send){Capabilities=[0x79,0x03],IsBlocked=id=>Store.State.Blocked.Contains(id)};
         foreach(var pair in Store.State.KnownPeers){Peers[pair.Key]=pair.Value with{LastSeen=0,Authenticated=false};Mesh.RestorePeer(pair.Value);}
         foreach(var pair in Store.State.PinnedSigningKeys)Mesh.RestorePinnedKey(pair.Key,pair.Value);
         Mesh.RestoreArchive(Store.State.GossipArchive);
         Mesh.IdentityAuthenticated+=(peer,key)=>Post(()=>{Store.State.PinnedSigningKeys[peer]=key;Store.Save();});
-        Bluetooth.Status+=s=>Status?.Invoke(s);Bluetooth.Packet+=(ingress,b)=>_=Mesh.Receive(b,ingress);Mesh.DirectNeighbors=()=>Bluetooth.DirectPeers;Mesh.IngressPeerValidated+=(ingress,peer)=>{Bluetooth.RememberDirectPeer(ingress,peer);_=Mesh.PeerLinkReady(peer,Bluetooth.LinkEpoch(ingress));};Bluetooth.LinkReady+=()=>_=OnLinkReady();
+        Bluetooth.Status+=s=>Status?.Invoke(s);Bluetooth.Packet+=(ingress,epoch,b)=>_=Mesh.Receive(b,ingress,epoch);Mesh.LinkAuthenticated+=Bluetooth.RememberAuthenticated;Mesh.DirectNeighbors=()=>Bluetooth.DirectPeers;Mesh.IngressPeerValidated+=(ingress,peer)=>{Bluetooth.RememberDirectPeer(ingress,peer);var epoch=Bluetooth.LinkEpoch(ingress);_=Mesh.PeerLinkReady(peer,epoch);if(Store.State.Bridge||Store.State.Favorites.Contains(peer)&&Store.State.FavoritedBy.Contains(peer))_=Mesh.ProveDirectLink(peer,epoch,Bluetooth.AuthenticatedFor(peer).Select(l=>l.Epoch).ToArray());};Bluetooth.LinkReady+=()=>_=OnLinkReady();
         Mesh.Status+=s=>Status?.Invoke(s);Mesh.PeerChanged+=p=>{Peers[p.Id]=p;Post(()=>{Store.State.KnownPeers[p.Id]=p;Store.Save();});PeersChanged?.Invoke();};
         Mesh.Message+=m=>Post(()=>{if(m.IsPrivate&&HandleFavorite(m.PeerId!,m.Content))return;Add(new(m.IsPrivate?"mesh:"+m.PeerId:"mesh",m.Id,m.Sender,m.Content,m.Timestamp,Peer:m.PeerId));});
         Mesh.Media+=(peer,media,isPrivate)=>Post(()=>ReceiveRawMedia(peer,media,isPrivate));
-        Mesh.AcceptPrivateMedia=AcceptMedia;
+        Mesh.AcceptPrivateMedia=AcceptMedia;Mesh.CourierReceived+=(peer,bytes,direct)=>Post(()=>ReceiveCourier(peer,bytes,direct));
         foreach(string fingerprint in Store.State.PrivateMediaCapable)Mesh.RestoreMediaCapable(fingerprint);
         Mesh.MediaCapabilityObserved+=fingerprint=>Post(()=>{Store.State.PrivateMediaCapable.Add(fingerprint);Store.Save();});
         Mesh.Receipt+=(peer,id,status)=>Post(()=>UpdateReceipt(id,status,"mesh:"+peer));
         Mesh.MediaTransferStatus+=(peer,id,status)=>Post(()=>UpdateReceipt(id,status,"mesh:"+peer));
-        Relays.Status+=s=>Status?.Invoke(s);Relays.Received+=e=>Post(()=>OnNostr(e));
+        Relays.Status+=s=>{Status?.Invoke(s);Post(()=>_=Observe(()=>RefreshCourierBridge(true)));};Relays.Received+=e=>Post(()=>OnNostr(e));
         Mesh.TypedPayload+=(peer,type,bytes)=>Post(()=>HandleTyped(peer,type,bytes));
         Mesh.Archived+=packet=>Post(()=>ArchivePacket(packet));ConfigureGateway();
     }
@@ -72,6 +72,7 @@ public sealed partial class AppController:IAsyncDisposable
     {
         try
         {
+            if(e.kind==BridgeDrop.Kind){_=Observe(async()=>{await bridgeCourier.Receive(e);});return;}
             if(!fromMesh)GatewayRelayEvent(e);
             if(!seenEvents.TryAdd(e.id,0))return;if(seenEvents.Count>20000)seenEvents.Clear();
             if(e.kind==1059)
@@ -174,19 +175,19 @@ public sealed partial class AppController:IAsyncDisposable
             int i=Store.State.Messages.FindIndex(m=>m.Id==id&&m.Own&&(expectedConversation==null||m.Conversation==expectedConversation));
             if(i<0)return;
             message=Store.State.Messages[i];
-            if(message.Status=="read"&&status=="delivered")return;
+            if(message.Status=="read"&&status!="read"||message.Status=="delivered"&&status is not ("read" or "delivered"))return;
             Store.State.Messages[i]=message with{Status=status};
         }
         if(status is "read" or "delivered")Store.State.Outbox.RemoveAll(p=>p.Id==id&&message.Conversation=="mesh:"+p.Peer);
         Store.Save();Receipt?.Invoke(id,status);
     }
-    private bool HandleFavorite(string peer,string text)
+    private bool HandleFavorite(string peer,string text,bool persist=true)
     {
         bool favorite=text.StartsWith("[FAVORITED]"),unfavorite=text.StartsWith("[UNFAVORITED]");if(!favorite&&!unfavorite)return false;
         if(favorite)Store.State.FavoritedBy.Add(peer);else Store.State.FavoritedBy.Remove(peer);
         int colon=text.IndexOf(':');if(colon>=0)
         {try{string pub=Bytes.Hex(Bech32.Decode(text[(colon+1)..],"npub"));if(pub.Length==64){Store.State.MeshNostrKeys[peer]=pub;Store.State.NostrPeers[pub]=Peers.GetValueOrDefault(peer)?.Nickname??peer[..8];}}catch(FormatException){}}
-        Store.Save();PeersChanged?.Invoke();return true;
+        if(persist){Store.Save();PeersChanged?.Invoke();}return true;
     }
     public async Task SetFavorite(string peer,bool enabled)
     {
@@ -282,5 +283,5 @@ public sealed partial class AppController:IAsyncDisposable
         }
         catch(Exception e)when(e is InvalidDataException or CryptographicException or ArgumentException or InvalidOperationException or KeyNotFoundException or OverflowException or System.Text.Json.JsonException){Status?.Invoke("Rejected group payload: "+e.Message);}
     }
-    public async ValueTask DisposeAsync(){if(disposed)return;disposed=true;stop.Cancel();Bluetooth.Dispose();await DisposeVoice();if(maintenance!=null)try{await maintenance;}catch(OperationCanceledException){}await Relays.DisposeAsync();if(tor!=null)await tor.DisposeAsync();await Mesh.DisposeAsync();stop.Dispose();}
+    public async ValueTask DisposeAsync(){if(disposed)return;disposed=true;bridgeCourier.SetEnabled(false);stop.Cancel();Bluetooth.Dispose();await DisposeVoice();if(maintenance!=null)try{await maintenance;}catch(OperationCanceledException){}await Relays.DisposeAsync();if(tor!=null)await tor.DisposeAsync();await Mesh.DisposeAsync();stop.Dispose();}
 }

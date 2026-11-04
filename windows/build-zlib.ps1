@@ -7,7 +7,13 @@ tar -xzf (Join-Path $PSScriptRoot 'vendor/zlib/zlib-1.3.2.tar.gz') -C $source --
 if ($LASTEXITCODE) { throw 'zlib source extraction failed' }
 $arch = if ($Rid -eq 'win-arm64') { 'ARM64' } else { 'x64' }
 $build = Join-Path $BuildRoot $Rid
-cmake -S $source -B $build -G "Visual Studio 17 2022" -A $arch -DZLIB_BUILD_TESTING=OFF -DZLIB_BUILD_STATIC=OFF -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+$installation = (& $vswhere -latest -products '*' -format json | ConvertFrom-Json) | Select-Object -First 1
+if (!$installation) { throw 'Visual Studio C++ build tools were not found' }
+$major = $installation.installationVersion.Split('.')[0]
+$year = $installation.catalog.productLineVersion
+$generator = "Visual Studio $major $year"
+cmake -S $source -B $build -G $generator -A $arch "-DCMAKE_GENERATOR_INSTANCE=$($installation.installationPath)" -DZLIB_BUILD_TESTING=OFF -DZLIB_BUILD_STATIC=OFF -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
 if ($LASTEXITCODE) { throw 'zlib configuration failed' }
 cmake --build $build --config Release --target zlib --parallel 4
 if ($LASTEXITCODE) { throw 'zlib compilation failed' }

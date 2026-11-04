@@ -137,7 +137,7 @@ public sealed class BluetoothTransport:IDisposable
             // iOS accumulates central writes by ATT offset, not by appending
             // independent offset-zero writes. Use complete protocol frames;
             // low-MTU links need an actual prepare/execute long write.
-            foreach(var part in FragmentAssembler.Split(packet,mtu>=64?mtu:512))
+            foreach(var part in FragmentAssembler.Split(packet,BleFraming.CentralFrameLimit(mtu)))
             {
                 if(link.Retired!=0||stillValid!=null&&!stillValid())return false;
                 var encoded=part.Encode(part.Type is 0x10 or 0x11);

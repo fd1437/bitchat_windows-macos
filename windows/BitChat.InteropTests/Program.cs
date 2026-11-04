@@ -161,3 +161,11 @@ foreach(var writeReference in reference.GetProperty("central_write_offsets").Enu
         $"Actual Swift central-write receiver requires offsets for split {mtu}-byte writes");
 }
 Console.WriteLine($"TOTAL {passed} checks passed");
+
+foreach(int attPayload in new[]{64,128})
+{
+    var file=new MeshPacket(0x11,new byte[]{1,2,3,4,5,6,7,8},RandomNumberGenerator.GetBytes(1024*1024),new byte[]{8,7,6,5,4,3,2,1},Version:2,Timestamp:(ulong)Bytes.Now);
+    int count=FragmentAssembler.Split(file,BleFraming.CentralFrameLimit(attPayload)).Count();
+    Check(count<=8192,$"One-MiB central transfer stays within receiver fragment quota on {attPayload}-byte ATT link");
+}
+Console.WriteLine($"TOTAL {passed} checks passed");

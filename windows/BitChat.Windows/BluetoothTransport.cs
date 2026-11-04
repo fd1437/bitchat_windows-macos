@@ -76,14 +76,14 @@ public sealed class BluetoothTransport:IDisposable
         try
         {
             device=await BluetoothLEDevice.FromBluetoothAddressAsync(e.BluetoothAddress);if(device==null)return;
-            var services=await device.GetGattServicesForUuidAsync(ServiceId,BluetoothCacheMode.Uncached);
+            var services=await device.GetGattServicesForUuidAsync(ServiceId,BluetoothCacheMode.Uncached).AsTask().WaitAsync(TimeSpan.FromSeconds(15),stop.Token);
             if(services.Status!=GattCommunicationStatus.Success||services.Services.Count==0)return;service=services.Services[0];
-            var chars=await service.GetCharacteristicsForUuidAsync(CharacteristicId,BluetoothCacheMode.Uncached);
+            var chars=await service.GetCharacteristicsForUuidAsync(CharacteristicId,BluetoothCacheMode.Uncached).AsTask().WaitAsync(TimeSpan.FromSeconds(15),stop.Token);
             if(chars.Status!=GattCommunicationStatus.Success||chars.Characteristics.Count==0)return;
             var characteristic=chars.Characteristics[0];openedEpoch=authenticatedLinks.Open(e.BluetoothAddress.ToString("x"));var link=new Link(device,service,characteristic,openedEpoch.Value){Address=e.BluetoothAddress};
             service.Session.MaintainConnection=true;
             characteristic.ValueChanged+=(_,ev)=>Receive(link.Stream,BytesFrom(ev.CharacteristicValue),e.BluetoothAddress.ToString("x"),link.Epoch);
-            var subscribed=await characteristic.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify);
+            var subscribed=await characteristic.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify).AsTask().WaitAsync(TimeSpan.FromSeconds(10),stop.Token);
             if(subscribed!=GattCommunicationStatus.Success)throw new IOException("Notification subscription failed: "+subscribed);
             if(stop.IsCancellationRequested)return;
             links[e.BluetoothAddress]=link;link.WasConnected=device.ConnectionStatus==BluetoothConnectionStatus.Connected;
@@ -134,18 +134,22 @@ public sealed class BluetoothTransport:IDisposable
         {
             if(link.Retired!=0)return false;
             int mtu=Math.Clamp((int)link.Service.Session.MaxPduSize-3,20,512);
-            // A protocol fragment can span several ATT writes, just as it can
-            // span notifications. Never force a 64-byte minimum on a 20-byte link.
-            foreach(var part in FragmentAssembler.Split(packet,512))
+            // iOS accumulates central writes by ATT offset, not by appending
+            // independent offset-zero writes. Use complete protocol frames;
+            // low-MTU links need an actual prepare/execute long write.
+            foreach(var part in FragmentAssembler.Split(packet,mtu>=64?mtu:512))
             {
+                if(link.Retired!=0||stillValid!=null&&!stillValid())return false;
                 var encoded=part.Encode(part.Type is 0x10 or 0x11);
-                foreach(var bytes in BleFraming.Chunks(encoded,mtu))
+                GattCommunicationStatus status;
+                if(encoded.Length<=mtu)
+                    status=await link.Characteristic.WriteValueAsync(Buffer(encoded),GattWriteOption.WriteWithResponse).AsTask().WaitAsync(TimeSpan.FromSeconds(10),stop.Token);
+                else
                 {
-                    if(link.Retired!=0||stillValid!=null&&!stillValid())return false;
-                    var chunk=Buffer(bytes);
-                    var status=await link.Characteristic.WriteValueAsync(chunk,GattWriteOption.WriteWithResponse).AsTask().WaitAsync(TimeSpan.FromSeconds(10),stop.Token);
-                    if(status!=GattCommunicationStatus.Success)throw new IOException(status.ToString());
+                    var transaction=new GattReliableWriteTransaction();transaction.WriteValue(link.Characteristic,Buffer(encoded));
+                    status=await transaction.CommitAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10),stop.Token);
                 }
+                if(status!=GattCommunicationStatus.Success)throw new IOException(status.ToString());
                 if(part.Type==0x20)await Task.Delay(12,stop.Token);
             }
             return stillValid==null||stillValid();
@@ -188,7 +192,8 @@ public sealed class BluetoothTransport:IDisposable
     {
         if(stop.IsCancellationRequested)return;
         foreach(var link in links.Values)
-            if(link.WasConnected&&link.Device.ConnectionStatus==BluetoothConnectionStatus.Disconnected)Retire(link,"Bluetooth link expired; reconnecting");
+            try{if(link.WasConnected&&link.Device.ConnectionStatus==BluetoothConnectionStatus.Disconnected)Retire(link,"Bluetooth link expired; reconnecting");}
+            catch(ObjectDisposedException){}
         if(watcher?.Status is BluetoothLEAdvertisementWatcherStatus.Stopped or BluetoothLEAdvertisementWatcherStatus.Aborted)
             try{watcher.Start();}catch(Exception e){Status?.Invoke("Bluetooth discovery retry: "+e.Message);}
     }

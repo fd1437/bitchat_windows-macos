@@ -130,7 +130,7 @@ foreach(int attPayload in new[]{20,61,182,244,512})
             bounded&=chunk.Length<=attPayload;
             foreach(var frame in stream.Add(chunk))restored=assembly.Add(MeshPacket.Decode(frame))??restored;
         }
-    Check(bounded&&restored!=null&&restored.Payload.SequenceEqual(content),$"BLE file stream survives negotiated {attPayload}-byte ATT writes");
+    Check(bounded&&restored!=null&&restored.Payload.SequenceEqual(content),$"BLE notification stream survives negotiated {attPayload}-byte ATT payloads");
 }
 using(var offlineMesh=new MeshEngine(RandomNumberGenerator.GetBytes(32),RandomNumberGenerator.GetBytes(32),"offline",_=>Task.FromResult(0)))
 {
@@ -148,5 +148,16 @@ Console.WriteLine($"TOTAL {passed} checks passed");
     clock=1000;var idleAssembly=new FragmentAssembler(()=>clock);idleAssembly.Add(fragmentsForTiming[0]);clock+=61000;completed=null;
     foreach(var fragment in fragmentsForTiming.Skip(1))completed=idleAssembly.Add(fragment)??completed;
     Check(completed==null,"Abandoned file assembly still expires after inactivity");
+}
+Console.WriteLine($"TOTAL {passed} checks passed");
+
+foreach(var writeReference in reference.GetProperty("central_write_offsets").EnumerateArray())
+{
+    byte[] wire=Convert.FromBase64String(writeReference.GetProperty("wire").GetString()!);
+    int mtu=writeReference.GetProperty("att_payload").GetInt32();
+    Check(writeReference.GetProperty("accepted_offsets").GetBoolean()
+        &&writeReference.GetProperty("accepted_offset_zero").GetBoolean()==(wire.Length<=mtu)
+        &&MeshPacket.Decode(wire).Payload.SequenceEqual(Convert.FromBase64String(writeReference.GetProperty("payload").GetString()!)),
+        $"Actual Swift central-write receiver requires offsets for split {mtu}-byte writes");
 }
 Console.WriteLine($"TOTAL {passed} checks passed");

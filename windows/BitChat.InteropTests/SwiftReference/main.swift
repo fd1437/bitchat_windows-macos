@@ -48,4 +48,19 @@ let dropBytes=dropEnvelope.encode()!
 let dropIdentity=try NostrIdentity(privateKeyData:Data(repeating:0x13,count:32))
 let dropEvent=try NostrProtocol.createCourierDropEvent(envelope:dropBytes,recipientTagHex:dropTag.hexEncodedString(),expiresAt:dropNow.addingTimeInterval(3600),senderIdentity:dropIdentity)
 output["bridge_drop"]=["now_ms":Int64(dropNow.timeIntervalSince1970*1000),"envelope":dropBytes.base64EncodedString(),"event":try dropEvent.jsonString(),"sender_key":SwiftBridgeIdentity.fixture("bridge-été-001",courierRecipient.publicKey.rawRepresentation),"recipient_public":courierRecipient.publicKey.rawRepresentation.base64EncodedString()]
+
+var writeFixtures:[[String:Any]]=[]
+let writeWire=Data(base64Encoded:packets[3]["wire"] as! String)!
+for mtu in [20,61,182,244,512] {
+    var correct=BLEInboundWriteBuffer(),wrong=BLEInboundWriteBuffer()
+    var accepted=false,offsetZeroAccepted=false
+    for offset in stride(from:0,to:writeWire.count,by:mtu) {
+        let chunk=Data(writeWire[offset..<min(offset+mtu,writeWire.count)])
+        if case .decoded = correct.append(chunks:[BLEInboundWriteChunk(offset:offset,data:chunk)],for:"peer",capBytes:4096){accepted=true}
+        if case .decoded = wrong.append(chunks:[BLEInboundWriteChunk(offset:0,data:chunk)],for:"peer",capBytes:4096){offsetZeroAccepted=true}
+    }
+    precondition(accepted)
+    writeFixtures.append(["att_payload":mtu,"wire":writeWire.base64EncodedString(),"payload":packets[3]["payload"]!,"accepted_offsets":accepted,"accepted_offset_zero":offsetZeroAccepted])
+}
+output["central_write_offsets"]=writeFixtures
 try JSONSerialization.data(withJSONObject:output,options:[.prettyPrinted,.sortedKeys]).write(to:URL(fileURLWithPath:CommandLine.arguments[1]))

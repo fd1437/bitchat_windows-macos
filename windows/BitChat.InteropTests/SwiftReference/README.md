@@ -15,3 +15,8 @@ NostrError and senderDropKey implementations, wrapped to compile independently;
 the three TransportConfig tag limits are copied unchanged. No signing mock is used.
 Only bridge_drop was appended to the previously frozen JSON: regenerating the
 whole generator produces new randomized Ed25519/Schnorr signatures elsewhere.
+
+Central write fixtures run the unmodified upstream BLEInboundWriteBuffer.swift
+with correctly offset prepare-write chunks and with independent offset-zero
+writes. This documents why notification stream chunking must not be applied to
+Windows-to-iOS characteristic writes.

@@ -97,9 +97,14 @@ public static class Diagnostics
         MainWindow? window=null;
         try
         {
-            window=new MainWindow(new StateStore(),true);var content=(FrameworkElement)window.Content;content.Measure(new Size(1120,780));content.Arrange(new Rect(0,0,1120,780));content.UpdateLayout();
+            window=new MainWindow(new StateStore(),true);
+            window.Show();window.Close();
+            if(window.IsVisible)throw new InvalidOperationException("Closing must hide the window");
+            window.RestoreFromTray();
+            if(!window.IsVisible)throw new InvalidOperationException("Tray restore must reopen the same window");
+            var content=(FrameworkElement)window.Content;content.Measure(new Size(1120,780));content.Arrange(new Rect(0,0,1120,780));content.UpdateLayout();
             var render=new RenderTargetBitmap(1120,780,96,96,PixelFormats.Pbgra32);render.Render(content);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(render));using var stream=File.Create(path);encoder.Save(stream);
         }
-        finally{if(window!=null)await window.ShutdownDiagnostics();StateStore.OverrideRoot=null;if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
+        finally{if(window!=null){await window.ShutdownDiagnostics();window.Close();}StateStore.OverrideRoot=null;if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
     }
 }

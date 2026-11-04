@@ -118,3 +118,35 @@ Console.WriteLine($"TOTAL {passed} checks passed");
 
 await BridgeCourierTests.Run(Check,reference);
 Console.WriteLine($"TOTAL {passed} checks passed");
+
+foreach(int attPayload in new[]{20,61,182,244,512})
+{
+    byte[] content=RandomNumberGenerator.GetBytes(65536);
+    var original=new MeshPacket(0x11,new byte[]{1,2,3,4,5,6,7,8},content,new byte[]{8,7,6,5,4,3,2,1},Version:2,Timestamp:(ulong)Bytes.Now);
+    var stream=new PacketStream();var assembly=new FragmentAssembler();MeshPacket? restored=null;bool bounded=true;
+    foreach(var fragment in FragmentAssembler.Split(original,512))
+        foreach(var chunk in BleFraming.Chunks(fragment.Encode(fragment.Type is 0x10 or 0x11),attPayload))
+        {
+            bounded&=chunk.Length<=attPayload;
+            foreach(var frame in stream.Add(chunk))restored=assembly.Add(MeshPacket.Decode(frame))??restored;
+        }
+    Check(bounded&&restored!=null&&restored.Payload.SequenceEqual(content),$"BLE file stream survives negotiated {attPayload}-byte ATT writes");
+}
+using(var offlineMesh=new MeshEngine(RandomNumberGenerator.GetBytes(32),RandomNumberGenerator.GetBytes(32),"offline",_=>Task.FromResult(0)))
+{
+    bool failed=false;try{await offlineMesh.SendMedia(new("test.bin","application/octet-stream",[1,2,3]));}catch(IOException){failed=true;}
+    Check(failed,"Attachment with no accepting Bluetooth link reports failure");
+}
+Console.WriteLine($"TOTAL {passed} checks passed");
+
+{
+    var packet=new MeshPacket(0x11,new byte[]{1,2,3,4,5,6,7,8},RandomNumberGenerator.GetBytes(4096),Version:2,Timestamp:(ulong)Bytes.Now);
+    var fragmentsForTiming=FragmentAssembler.Split(packet,512).ToArray();long clock=1000;
+    var activeAssembly=new FragmentAssembler(()=>clock);MeshPacket? completed=null;
+    foreach(var fragment in fragmentsForTiming){completed=activeAssembly.Add(fragment)??completed;clock+=20000;}
+    Check(completed!=null&&completed.Payload.SequenceEqual(packet.Payload),"Active file assembly survives more than one minute of steady progress");
+    clock=1000;var idleAssembly=new FragmentAssembler(()=>clock);idleAssembly.Add(fragmentsForTiming[0]);clock+=61000;completed=null;
+    foreach(var fragment in fragmentsForTiming.Skip(1))completed=idleAssembly.Add(fragment)??completed;
+    Check(completed==null,"Abandoned file assembly still expires after inactivity");
+}
+Console.WriteLine($"TOTAL {passed} checks passed");

@@ -17,7 +17,16 @@ public static class Program
             var app=new Application();
             if(args.Length>=2&&args[0]=="--self-test"){Task.Run(()=>Diagnostics.Run(args[1])).GetAwaiter().GetResult();Diagnostics.RenderUi(Path.ChangeExtension(args[1],".png")).GetAwaiter().GetResult();return;}
             app.DispatcherUnhandledException+=(_,e)=>{MessageBox.Show(e.Exception.Message,"BitChat",MessageBoxButton.OK,MessageBoxImage.Error);e.Handled=true;};
-            var store=new StateStore();app.Run(new MainWindow(store));
+            using var instance=new Mutex(true,@"Local\BitChat.Windows.Instance",out bool first);
+            using var activate=new EventWaitHandle(false,EventResetMode.AutoReset,@"Local\BitChat.Windows.Activate");
+            bool background=args.Contains("--background");
+            if(!first){if(!background)activate.Set();return;}
+            app.ShutdownMode=ShutdownMode.OnExplicitShutdown;
+            var store=new StateStore();var window=new MainWindow(store,false,background);
+            var activationTimer=new System.Windows.Threading.DispatcherTimer{Interval=TimeSpan.FromMilliseconds(500)};
+            activationTimer.Tick+=(_,_)=>{if(activate.WaitOne(0))window.RestoreFromTray();};activationTimer.Start();
+            app.SessionEnding+=(_,_)=>window.EndWindowsSession();
+            app.Run(window);activationTimer.Stop();
         }
         catch(Exception e){if(args.Length>=2&&args[0]=="--self-test"){File.WriteAllText(args[1]+".error.txt",e.ToString());Environment.ExitCode=1;return;}MessageBox.Show("BitChat could not start:\n"+e.Message,"BitChat",MessageBoxButton.OK,MessageBoxImage.Error);}
     }
@@ -36,7 +45,7 @@ public sealed class MainWindow:Window
     private readonly Brush bg=new SolidColorBrush(Color.FromRgb(13,17,20)),panel=new SolidColorBrush(Color.FromRgb(20,26,30)),green=new SolidColorBrush(Color.FromRgb(99,230,153)),muted=new SolidColorBrush(Color.FromRgb(151,166,175));
     private long lastPanic;private int panicTaps;private bool closing;
     private readonly System.Windows.Forms.NotifyIcon tray=new(){Text="BitChat",Visible=true};
-    public MainWindow(StateStore store,bool diagnostics=false)
+    public MainWindow(StateStore store,bool diagnostics=false,bool background=false)
     {
         tray.Visible=!diagnostics;
         this.store=store;controller=new(store);Title="bitchat · Windows";Width=1120;Height=780;MinWidth=780;MinHeight=520;Background=bg;Foreground=Brushes.WhiteSmoke;FontFamily=new FontFamily("Cascadia Mono, Consolas");FontSize=13;
@@ -56,9 +65,35 @@ public sealed class MainWindow:Window
         var ptt=Button("hold to talk",()=>{});ptt.PreviewMouseLeftButtonDown+=async(_,e)=>{e.Handled=true;ptt.CaptureMouse();await Guard(()=>controller.BeginVoice(conversation,true));};ptt.PreviewMouseLeftButtonUp+=async(_,e)=>{e.Handled=true;ptt.ReleaseMouseCapture();await Guard(()=>controller.EndVoice(false));};DockPanel.SetDock(ptt,Dock.Left);composer.Children.Add(ptt);
         input.Background=panel;input.Foreground=Brushes.WhiteSmoke;input.CaretBrush=green;input.BorderBrush=new SolidColorBrush(Color.FromRgb(48,63,70));input.Padding=new Thickness(10);input.KeyDown+=async(_,e)=>{if(e.Key==Key.Enter&&(Keyboard.Modifiers&ModifierKeys.Shift)==0){e.Handled=true;await Send();}};composer.Children.Add(input);DockPanel.SetDock(composer,Dock.Bottom);main.Children.Add(composer);
         scroll=new ScrollViewer{Content=messages,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};main.Children.Add(scroll);
-        try{tray.Icon=System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!);}catch{}tray.DoubleClick+=(_,_)=>{Show();WindowState=WindowState.Normal;Activate();};
-        Deactivated+=(_,_)=>_=controller.StopVoiceAutoplay();BindController();RefreshChannels();Select("mesh");Loaded+=async(_,_)=>await Guard(()=>controller.Start());Closing+=async(_,e)=>{if(closing)return;e.Cancel=true;closing=true;await controller.DisposeAsync();tray.Visible=false;tray.Dispose();Close();};
+        try{tray.Icon=System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!);}catch{}tray.DoubleClick+=(_,_)=>Ui(RestoreFromTray);
+        var trayMenu=new System.Windows.Forms.ContextMenuStrip();
+        trayMenu.Items.Add("Open BitChat",null,(_,_)=>Ui(RestoreFromTray));
+        trayMenu.Items.Add("Quit BitChat",null,(_,_)=>Ui(async()=>await Quit()));tray.ContextMenuStrip=trayMenu;
+        Deactivated+=(_,_)=>_=controller.StopVoiceAutoplay();BindController();RefreshChannels();Select("mesh");if(!diagnostics)
+        {
+            bool started=false;
+            Loaded+=async(_,_)=>
+            {
+                if(started)return;started=true;
+                if(background)Hide();
+                if(!StartupRegistration.Prompted)
+                {
+                    bool enabled=MessageBox.Show(this,"Start BitChat automatically when you sign in to Windows? It will run in the notification area. You can change this in Settings.","BitChat startup",MessageBoxButton.YesNo,MessageBoxImage.Question)==MessageBoxResult.Yes;
+                    await Guard(()=>{StartupRegistration.Set(enabled);StartupRegistration.Prompted=true;return Task.CompletedTask;});
+                }
+                await Guard(()=>controller.Start());
+            };
+        }
+        Closing+=(_,e)=>{if(closing)return;e.Cancel=true;Hide();};
     }
+    public void RestoreFromTray(){Show();WindowState=WindowState.Normal;Activate();}
+    private async Task Quit()
+    {
+        if(closing)return;closing=true;
+        try{await controller.DisposeAsync();}
+        finally{tray.Visible=false;tray.Dispose();Application.Current.Shutdown();}
+    }
+    public void EndWindowsSession(){closing=true;tray.Visible=false;tray.Dispose();_=controller.DisposeAsync();}
     public async Task ShutdownDiagnostics(){closing=true;await controller.DisposeAsync();tray.Visible=false;tray.Dispose();}
     private Button Button(string text,Action action)
     {var b=new Button{Content=text,Background=panel,Foreground=green,BorderBrush=new SolidColorBrush(Color.FromRgb(48,63,70)),Padding=new Thickness(9,7,9,7),Margin=new Thickness(3),Cursor=Cursors.Hand};b.Click+=(_,_)=>action();return b;}
@@ -69,7 +104,7 @@ public sealed class MainWindow:Window
         controller.ConfirmLegacyMedia=peer=>Task.FromResult(MessageBox.Show(this,"This contact ("+peer+") has not proved encrypted attachment support. Send this attachment without end-to-end encryption? Nearby relays may read it. This approval applies only to this send.","Legacy attachment",MessageBoxButton.YesNo,MessageBoxImage.Warning)==MessageBoxResult.Yes);
         controller.Status+=s=>Ui(()=>{status.Text=s;network.Text=$"BLE {controller.Bluetooth.Connections} · relays {controller.Relays.Connected}";});
         controller.PeersChanged+=()=>Ui(()=>{RefreshChannels();network.Text=$"BLE {controller.Bluetooth.Connections} · relays {controller.Relays.Connected} · nearby {controller.NearbyPresence}";});controller.TimelineChanged+=()=>Ui(()=>Select(conversation));
-        controller.Message+=m=>Ui(()=>{if(!m.Own&&!IsActive&&store.State.Notifications){var notification=NotificationContent.ForMessage(m.Sender,m.Text,store.State.HideNotificationPreviews);tray.ShowBalloonTip(5000,notification.Title,notification.Body,System.Windows.Forms.ToolTipIcon.Info);}if(m.Conversation==conversation){Append(m);scroll.ScrollToEnd();if(!m.Own&&m.Conversation.StartsWith("mesh:"))_=controller.MarkMeshRead(m);if(!m.Own&&m.Conversation.StartsWith("nostr:"))_=controller.MarkNostrRead(m.Conversation[6..],m.Id); }else if(!m.Own)status.Text=$"New message from {m.Sender}";RefreshChannels();});
+        controller.Message+=m=>Ui(()=>{if(!m.Own&&!IsActive&&store.State.Notifications){var notification=NotificationContent.ForMessage(m.Sender,m.Text,store.State.HideNotificationPreviews);tray.ShowBalloonTip(5000,notification.Title,notification.Body,System.Windows.Forms.ToolTipIcon.Info);}if(m.Conversation==conversation){Append(m);scroll.ScrollToEnd();if(IsActive&&!m.Own&&m.Conversation.StartsWith("mesh:"))_=controller.MarkMeshRead(m);if(IsActive&&!m.Own&&m.Conversation.StartsWith("nostr:"))_=controller.MarkNostrRead(m.Conversation[6..],m.Id); }else if(!m.Own)status.Text=$"New message from {m.Sender}";RefreshChannels();});
         controller.Receipt+=(id,value)=>Ui(()=>{if(receiptLabels.TryGetValue(id,out var label))label.Text=value;});
     }
     private void RefreshChannels()
@@ -186,6 +221,8 @@ public sealed class MainWindow:Window
     {
         var d=new Window{Owner=this,Title="BitChat settings",Width=560,Height=710,Background=bg,Foreground=Foreground,WindowStartupLocation=WindowStartupLocation.CenterOwner};var p=new StackPanel{Margin=new Thickness(24)};d.Content=new ScrollViewer{Content=p,VerticalScrollBarVisibility=ScrollBarVisibility.Auto};
         p.Children.Add(new TextBlock{Text="identity & connections",FontSize=22,Foreground=green,Margin=new Thickness(0,0,0,20)});
+        var startupOption=new CheckBox{Content="Start BitChat when I sign in to Windows",IsChecked=StartupRegistration.Enabled,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(startupOption);
+        p.Children.Add(new TextBlock{Text="Closing the window keeps BitChat connected in the notification area. Use its tray menu to quit.",TextWrapping=TextWrapping.Wrap,Foreground=muted,Margin=new Thickness(0,0,0,16)});
         p.Children.Add(new TextBlock{Text="nickname"});var nick=new TextBox{Text=store.State.Nickname,Margin=new Thickness(0,6,0,16)};p.Children.Add(nick);
         p.Children.Add(new TextBlock{Text="Nostr relays · one wss:// URL per line"});var urls=new TextBox{Text=string.Join("\n",store.State.Relays),AcceptsReturn=true,Height=100,Margin=new Thickness(0,6,0,16)};p.Children.Add(urls);
         var gatewayOption=new CheckBox{Content="Share Nostr access with the nearby mesh",IsChecked=store.State.Gateway,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(gatewayOption);var bridgeOption=new CheckBox{Content="Internet bridge (mesh and private courier drops)",IsChecked=store.State.Bridge,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(bridgeOption);
@@ -194,7 +231,7 @@ public sealed class MainWindow:Window
         var previewsOption=new CheckBox{Content="Hide notification previews (sender, text and location)",IsChecked=store.State.HideNotificationPreviews,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(previewsOption);
         var liveOption=new CheckBox{Content="Live push-to-talk (autoplay only while this app is active)",IsChecked=store.State.LiveVoice,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(liveOption);
         p.Children.Add(new TextBlock{Text="Keys, history and attachments are encrypted for your Windows account with DPAPI. Relay changes take effect after restarting BitChat.",TextWrapping=TextWrapping.Wrap,Foreground=muted});
-        p.Children.Add(Button("save",()=>{string n=nick.Text.Trim();if(Bytes.Utf8(n).Length is <1 or >64){MessageBox.Show(d,"Nickname must contain 1–64 UTF-8 bytes.");return;}var relays=urls.Text.Split('\n',StringSplitOptions.TrimEntries|StringSplitOptions.RemoveEmptyEntries);if(relays.Any(u=>!Uri.TryCreate(u,UriKind.Absolute,out var uri)||uri.Scheme!="wss")){MessageBox.Show(d,"Relays must use wss://");return;}store.State.Notifications=notificationsOption.IsChecked==true;store.State.HideNotificationPreviews=previewsOption.IsChecked==true;store.State.LiveVoice=liveOption.IsChecked==true;if(!store.State.LiveVoice)_=controller.StopVoiceAutoplay();store.State.Gateway=gatewayOption.IsChecked==true;store.State.Bridge=bridgeOption.IsChecked==true;_=controller.RefreshGateway();store.State.UseTor=torOption.IsChecked==true;store.State.Nickname=n;store.State.Relays=relays.ToList();controller.Mesh.Nickname=n;store.Save();_=controller.Mesh.Announce();d.Close();}));
+        p.Children.Add(Button("save",()=>{string n=nick.Text.Trim();if(Bytes.Utf8(n).Length is <1 or >64){MessageBox.Show(d,"Nickname must contain 1–64 UTF-8 bytes.");return;}var relays=urls.Text.Split('\n',StringSplitOptions.TrimEntries|StringSplitOptions.RemoveEmptyEntries);if(relays.Any(u=>!Uri.TryCreate(u,UriKind.Absolute,out var uri)||uri.Scheme!="wss")){MessageBox.Show(d,"Relays must use wss://");return;}try{StartupRegistration.Set(startupOption.IsChecked==true);StartupRegistration.Prompted=true;}catch(Exception error){MessageBox.Show(d,"Could not update Windows startup: "+error.Message);return;}store.State.Notifications=notificationsOption.IsChecked==true;store.State.HideNotificationPreviews=previewsOption.IsChecked==true;store.State.LiveVoice=liveOption.IsChecked==true;if(!store.State.LiveVoice)_=controller.StopVoiceAutoplay();store.State.Gateway=gatewayOption.IsChecked==true;store.State.Bridge=bridgeOption.IsChecked==true;_=controller.RefreshGateway();store.State.UseTor=torOption.IsChecked==true;store.State.Nickname=n;store.State.Relays=relays.ToList();controller.Mesh.Nickname=n;store.Save();_=controller.Mesh.Announce();d.Close();}));
         p.Children.Add(Button("view identity",ShowIdentity));p.Children.Add(Button("show verification QR",ShowQr));p.Children.Add(Button("verify peer QR / link",ScanQr));p.Children.Add(new TextBlock{Text="BitChat for Windows · unsigned development build\nSource baseline: 04995f68e470",Foreground=muted,Margin=new Thickness(0,20,0,0)});d.ShowDialog();
     }
     private Window Dialog(string name,string text)=>new(){Owner=this,Title=name,Width=650,Height=350,Background=bg,Foreground=Foreground,WindowStartupLocation=WindowStartupLocation.CenterOwner,Content=new TextBox{Text=text,IsReadOnly=true,TextWrapping=TextWrapping.Wrap,Background=bg,Foreground=Foreground,BorderThickness=new Thickness(0),Margin=new Thickness(20)}};

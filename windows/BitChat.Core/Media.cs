@@ -23,21 +23,23 @@ public sealed record MediaPacket(string Name,string Mime,byte[] Content)
 
 public sealed class FragmentAssembler
 {
-    private sealed class Assembly(int total,byte type,long started){public int Total=total;public byte Type=type;public long Started=started;public Dictionary<int,byte[]> Chunks=[];public int Size;public string? Ingress;public Guid? Epoch;public bool Direct;}
+    private readonly Func<long> clock;
+    public FragmentAssembler(Func<long>? clock=null){this.clock=clock??(()=>Bytes.Now);}
+    private sealed class Assembly(int total,byte type,long started){public int Total=total;public byte Type=type;public long Started=started;public long LastProgress=started;public Dictionary<int,byte[]> Chunks=[];public int Size;public string? Ingress;public Guid? Epoch;public bool Direct;}
     private readonly Dictionary<string,Assembly> assemblies=[];
     public MeshPacket? Add(MeshPacket fragment)=>Add(fragment,null,null,out _);
     public MeshPacket? Add(MeshPacket fragment,string? ingress,Guid? epoch,out bool direct)
     {
         direct=false;
-        foreach(var old in assemblies.Where(x=>Bytes.Now-x.Value.Started>60000).Select(x=>x.Key).ToArray())assemblies.Remove(old);
+        foreach(var old in assemblies.Where(x=>clock()-x.Value.LastProgress>60000||clock()-x.Value.Started>600000).Select(x=>x.Key).ToArray())assemblies.Remove(old);
         var r=new WireReader(fragment.Payload);string id=Bytes.Hex(fragment.Sender)+Bytes.Hex(r.Read(8));int index=r.U16(),total=r.U16();byte type=r.Byte();
         if(total==0||total>8192||index>=total||r.Remaining>1280)throw new InvalidDataException("Invalid fragment");
-        if(!assemblies.TryGetValue(id,out var a)){if(assemblies.Count>=64)throw new InvalidDataException("Too many fragment assemblies");assemblies[id]=a=new(total,type,Bytes.Now){Ingress=ingress,Epoch=epoch,Direct=ingress!=null&&epoch!=null&&fragment.Ttl==7};}
+        if(!assemblies.TryGetValue(id,out var a)){if(assemblies.Count>=64)throw new InvalidDataException("Too many fragment assemblies");assemblies[id]=a=new(total,type,clock()){Ingress=ingress,Epoch=epoch,Direct=ingress!=null&&epoch!=null&&fragment.Ttl==7};}
         a.Direct&=a.Ingress==ingress&&a.Epoch==epoch&&fragment.Ttl==7;
         if(a.Total!=total||a.Type!=type){assemblies.Remove(id);throw new InvalidDataException("Conflicting fragment metadata");}
         var chunk=r.Read(r.Remaining);if(a.Chunks.TryGetValue(index,out var oldChunk)){if(!oldChunk.SequenceEqual(chunk))throw new InvalidDataException("Conflicting fragment");return null;}
         if(a.Size+chunk.Length>MeshPacket.MaxFileBytes||assemblies.Values.Sum(x=>x.Size)+chunk.Length>16*1024*1024){assemblies.Remove(id);throw new InvalidDataException("Fragment memory limit");}
-        a.Chunks[index]=chunk;a.Size+=chunk.Length;
+        a.Chunks[index]=chunk;a.Size+=chunk.Length;a.LastProgress=clock();
         if(a.Chunks.Count!=total)return null;
         assemblies.Remove(id);var packet=MeshPacket.Decode(Bytes.Join(Enumerable.Range(0,total).Select(i=>a.Chunks[i]).ToArray()));
         if(packet.Type!=type||!packet.Sender.SequenceEqual(fragment.Sender))throw new InvalidDataException("Reassembled packet identity mismatch");direct=a.Direct;return packet;

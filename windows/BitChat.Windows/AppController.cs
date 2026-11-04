@@ -52,7 +52,7 @@ public sealed partial class AppController:IAsyncDisposable
         maintenance=Task.Run(async()=>
         {
             using var timer=new PeriodicTimer(TimeSpan.FromSeconds(15));
-            try{while(await timer.WaitForNextTickAsync(stop.Token)){await Mesh.Announce();if(Bluetooth.Connections>0)await Mesh.RequestSync();Post(()=>_=MaintainOnUi());PeersChanged?.Invoke();}}catch(OperationCanceledException){}
+            try{while(await timer.WaitForNextTickAsync(stop.Token)){Bluetooth.Maintain();await Mesh.Announce();if(Bluetooth.Connections>0)await Mesh.RequestSync();Post(()=>_=MaintainOnUi());PeersChanged?.Invoke();}}catch(OperationCanceledException){}
         });
         if(Store.State.UseTor){tor=new();tor.Status+=s=>Status?.Invoke(s);Relays.Proxy=await tor.Start(stop.Token);}
         Relays.Start(Store.State.Relays);

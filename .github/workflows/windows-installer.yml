@@ -49,6 +49,7 @@ jobs:
           choco install nsis --yes --no-progress
           if ($LASTEXITCODE) { throw 'NSIS installation failed' }
           $payload = Join-Path $env:GITHUB_WORKSPACE 'windows/ci-publish'
+          Get-ChildItem $payload -Recurse | Select-Object FullName, Length
           $output = Join-Path $env:RUNNER_TEMP 'BitChat-Setup-unsigned.exe'
           & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" "/DPAYLOAD=$payload" "/DOUTPUT=$output" windows/installer.nsi
           if ($LASTEXITCODE) { throw 'NSIS packaging failed' }

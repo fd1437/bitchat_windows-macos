@@ -43,13 +43,13 @@ FunctionEnd
 Section "BitChat" SecMain
   SetOutPath "$INSTDIR"
   ${If} ${IsNativeARM64}
-    File /oname=BitChat.exe "${PAYLOAD}/win-arm64/BitChat.exe"
+    File /oname=BitChat.exe "${PAYLOAD}\win-arm64\BitChat.exe"
     SetOutPath "$INSTDIR\native\win-arm64"
-    File "${PAYLOAD}/win-arm64/native/win-arm64/bitchat_zlib.dll"
+    File "${PAYLOAD}\win-arm64\native\win-arm64\bitchat_zlib.dll"
   ${Else}
-    File /oname=BitChat.exe "${PAYLOAD}/win-x64/BitChat.exe"
+    File /oname=BitChat.exe "${PAYLOAD}\win-x64\BitChat.exe"
     SetOutPath "$INSTDIR\native\win-x64"
-    File "${PAYLOAD}/win-x64/native/win-x64/bitchat_zlib.dll"
+    File "${PAYLOAD}\win-x64\native\win-x64\bitchat_zlib.dll"
   ${EndIf}
   SetOutPath "$INSTDIR"
   File /oname=LICENSE.txt "../LICENSE"

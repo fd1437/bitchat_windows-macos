@@ -1,0 +1,54 @@
+name: Windows port validation
+on:
+  push:
+    branches: [codex/windows-native-port]
+    paths:
+      - 'windows/**'
+      - '.github/workflows/windows-port.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    name: Native validation (${{ matrix.rid }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+          - os: windows-11-arm
+            rid: win-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Wire and cryptography interoperability
+        shell: pwsh
+        run: dotnet run --project windows/BitChat.InteropTests -c Release
+      - name: Publish unsigned self-contained application
+        shell: pwsh
+        run: dotnet publish windows/BitChat.Windows -c Release -r ${{ matrix.rid }} -o windows/publish/${{ matrix.rid }}
+      - name: Exercise native dependencies and render the UI
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "BitChat-${{ matrix.rid }}.json"
+          $exe = Join-Path $env:GITHUB_WORKSPACE "windows/publish/${{ matrix.rid }}/BitChat.exe"
+          $p = Start-Process -FilePath $exe -ArgumentList @('--self-test', $report) -Wait -PassThru
+          if (Test-Path $report) { Get-Content $report }
+          if (Test-Path "$report.error.txt") { Get-Content "$report.error.txt" }
+          if ($p.ExitCode -ne 0) { throw "BitChat native self-test failed: $($p.ExitCode)" }
+          if (!(Test-Path $report)) { throw "The native process did not produce a diagnostic report" }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-diagnostics-${{ matrix.rid }}
+          path: ${{ runner.temp }}/BitChat-${{ matrix.rid }}.*
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BitChat-${{ matrix.rid }}
+          path: windows/publish/${{ matrix.rid }}/

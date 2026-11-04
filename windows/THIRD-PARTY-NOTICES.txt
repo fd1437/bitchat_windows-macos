@@ -1,0 +1,22 @@
+BitChat upstream Swift source: The Unlicense. See LICENSE.txt.
+.NET runtime and Windows Desktop runtime: MIT license.
+Source and notices: https://github.com/dotnet/runtime and https://github.com/dotnet/wpf
+BouncyCastle.Cryptography 2.6.2: MIT license.
+Source and license: https://github.com/bcgit/bc-csharp
+Windows SDK .NET projections: MIT license.
+Source and notices: https://github.com/microsoft/CsWinRT
+
+These components are embedded in the single-file application. The installer
+contains both x64 and ARM64 builds and installs the native build automatically.
+
+NBitcoin.Secp256k1 4.0.4: MIT license. https://github.com/MetacoSA/NBitcoin
+QRCoder 1.6.0: MIT license. https://github.com/codebude/QRCoder
+ZXing.Net 0.16.10: Apache-2.0 license. https://github.com/micjahn/ZXing.Net
+
+NAudio 2.2.1: MIT license. https://github.com/naudio/NAudio
+FFmpeg 9.0.2: custom minimal static Windows build, LGPL-2.1-or-later.
+Built without GPL/nonfree/external codec dependencies. LGPL text and build
+configuration are installed in media/. Corresponding source is distributed
+with the installer in media/source/ffmpeg-9.0.2.tar.xz.
+Official source: https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
+Source SHA256: 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e

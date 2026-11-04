@@ -1,0 +1,103 @@
+using BitChat.Core;
+using System.Text.Json;
+using System.Security.Cryptography;
+
+int passed=0;
+void Check(bool result,string name){if(!result)throw new Exception("FAIL: "+name);Console.WriteLine("PASS: "+name);passed++;}
+byte[] Hex(string s)=>Convert.FromHexString(s);
+var vectors=JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory,"NoiseTestVectors.json"))).RootElement;
+foreach(var v in vectors.EnumerateArray())
+{
+    byte[] Field(string key)=>Hex(v.GetProperty(key).GetString()!);
+    using var init=new NoiseHandshake(true,Field("init_static"),Field("init_prologue"),Field("init_ephemeral"));
+    using var resp=new NoiseHandshake(false,Field("resp_static"),Field("resp_prologue"),Field("resp_ephemeral"));
+    var messages=v.GetProperty("messages").EnumerateArray().ToArray();
+    for(int i=0;i<3;i++)
+    {
+        var payload=Hex(messages[i].GetProperty("payload").GetString()!);var expected=Hex(messages[i].GetProperty("ciphertext").GetString()!);
+        var writer=i%2==0?init:resp;var reader=i%2==0?resp:init;
+        var actual=writer.Write(payload);Check(actual.SequenceEqual(expected),$"Noise reference handshake frame {i+1}");
+        Check(reader.Read(actual).SequenceEqual(payload),$"Noise reference read {i+1}");
+    }
+    if(v.TryGetProperty("handshake_hash",out var h))Check(Bytes.Hex(init.HandshakeHash)==h.GetString(),"Noise handshake hash");
+    var a=init.Split(false);var b=resp.Split(false);
+    for(int i=3;i<messages.Length;i++)
+    {
+        var plain=Hex(messages[i].GetProperty("payload").GetString()!);var expected=Hex(messages[i].GetProperty("ciphertext").GetString()!);
+        var writer=i%2==1?b.Send:a.Send;var reader=i%2==1?a.Receive:b.Receive;
+        var actual=writer.Encrypt(plain);Check(actual.SequenceEqual(expected),$"Noise reference transport frame {i+1}");Check(reader.Decrypt(actual).SequenceEqual(plain),"Noise reference transport decrypt");
+    }
+}
+var fixtures=Path.Combine(AppContext.BaseDirectory,"Fixtures");
+foreach(var (file,keyFile,keyProp) in new[]{("LegacyPrivateEnvelope733098bb.json","LegacyPrivateEnvelope733098bbRecipientKey.json","recipient_private_key"),("AndroidLegacyPrivateEnvelopeB7f0b33d.json","AndroidLegacyPrivateEnvelopeB7f0b33dMetadata.json","recipient_private_key")})
+{
+    var e=NostrEvent.Parse(File.ReadAllText(Path.Combine(fixtures,file)));Check(e.Valid(),file+" Schnorr signature");
+    var key=Hex(JsonDocument.Parse(File.ReadAllText(Path.Combine(fixtures,keyFile))).RootElement.GetProperty(keyProp).GetString()!);
+    var rumor=PrivateEnvelope.Open(e,key);Check(rumor.content.Length>0,file+" authenticated decryption");Console.WriteLine("Fixture plaintext: "+rumor.content);
+}
+var s1=Schnorr.GenerateKey();var s2=Schnorr.GenerateKey();var wrap=PrivateEnvelope.Wrap("Windows ↔ iOS",s1,Bytes.Hex(Schnorr.Public(s2)));
+Check(PrivateEnvelope.Open(wrap,s2).content=="Windows ↔ iOS","Private envelope roundtrip");
+var cipher1=new NoiseCipher(RandomNumberGenerator.GetBytes(32),true);
+var keyReplay=RandomNumberGenerator.GetBytes(32);using var tx=new NoiseCipher(keyReplay.ToArray(),true);using var rx=new NoiseCipher(keyReplay.ToArray(),true);var encrypted=tx.Encrypt(Bytes.Utf8("hello"));rx.Decrypt(encrypted);
+try{rx.Decrypt(encrypted);Check(false,"Replay rejected");}catch(CryptographicException){Check(true,"Replay rejected");}
+Console.WriteLine($"{passed} interoperability/security checks passed.");
+
+foreach(var f in JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory,"apple-compression.json"))).RootElement.EnumerateArray())
+{
+ var raw=Convert.FromBase64String(f.GetProperty("raw").GetString()!);var expected=Convert.FromBase64String(f.GetProperty("deflate").GetString()!);
+ foreach(var level in new[]{System.IO.Compression.CompressionLevel.Optimal,System.IO.Compression.CompressionLevel.SmallestSize})
+ {using var stream=new MemoryStream();using(var z=new System.IO.Compression.DeflateStream(stream,level,true))z.Write(raw);Console.WriteLine($"Apple compression {raw.Length} {level}: {stream.ToArray().SequenceEqual(expected)}");}
+}
+
+var reference=JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory,"swift-reference.json"))).RootElement;
+var seed=Convert.FromBase64String(reference.GetProperty("seed").GetString()!);
+foreach(var item in reference.GetProperty("packets").EnumerateArray())
+{
+ var wire=Convert.FromBase64String(item.GetProperty("wire").GetString()!);var canonical=Convert.FromBase64String(item.GetProperty("signing").GetString()!);
+ var packet=MeshPacket.Decode(wire);Check(packet.SigningBytes().SequenceEqual(canonical),$"Actual Swift canonical signing bytes ({packet.Payload.Length} bytes)");
+ Check(Crypto.VerifyEd(Crypto.PublicEd(seed),packet.SigningBytes(),packet.Signature!),"Actual Swift signed packet verification");Check(packet.Encode().SequenceEqual(wire),"Actual Swift packet re-encoding");
+}
+var groupBytes=Convert.FromBase64String(reference.GetProperty("group_state").GetString()!);var group=PrivateGroup.Decode(groupBytes);
+Check(group.Valid(),"Actual Swift group creator signature");Check(group.Encode().SequenceEqual(groupBytes),"Actual Swift group state re-encoding");
+var groupMessage=group.Open(Convert.FromBase64String(reference.GetProperty("group_message").GetString()!));Check(groupMessage.Content=="bonjour Windows ↔ iOS","Actual Swift group message decryption and author signature");
+Console.WriteLine($"TOTAL {passed} checks passed");
+
+var transit=new Queue<(bool ToB,byte[] Data)>();
+Task<int> Link(bool toB,MeshPacket p){foreach(var fragment in FragmentAssembler.Split(p,128))transit.Enqueue((toB,fragment.Encode()));return Task.FromResult(1);}
+using var alice=new MeshEngine(RandomNumberGenerator.GetBytes(32),RandomNumberGenerator.GetBytes(32),"alice",p=>Link(true,p));
+using var bob=new MeshEngine(RandomNumberGenerator.GetBytes(32),RandomNumberGenerator.GetBytes(32),"bob",p=>Link(false,p));
+var received=new List<ChatMessage>();var statuses=new List<string>();MediaPacket? receivedMedia=null;
+bob.Message+=received.Add;bob.Media+=(_,media,_)=>receivedMedia=media;alice.Receipt+=(_,status)=>statuses.Add(status);
+alice.Status+=s=>Console.WriteLine("Alice: "+s);bob.Status+=s=>Console.WriteLine("Bob: "+s);
+async Task Pump(){int budget=10000;while(transit.Count>0){if(--budget==0)throw new Exception("Mesh relay loop");var m=transit.Dequeue();await(m.ToB?bob:alice).Receive(m.Data);}}
+await alice.Announce();await bob.Announce();await Pump();
+await alice.SendPrivate(bob.Id,"hello from Windows", "interop-dm-1");await Pump();
+Check(received.Any(m=>m.Id=="interop-dm-1"&&m.Content=="hello from Windows"),"Two-client Noise session and private-message delivery");
+Check(statuses.Contains("delivered"),"Two-client encrypted delivery receipt");
+var attachment=RandomNumberGenerator.GetBytes(4096);await alice.SendMedia(new("reference.bin","application/octet-stream",attachment),bob.Id);await Pump();
+Check(receivedMedia!=null&&receivedMedia.Content.SequenceEqual(attachment),"Encrypted media fragmentation/reassembly across 128-byte link");
+var hash=Crypto.Hash(Bytes.Utf8("tampered event"));Check(!Schnorr.Verify(Schnorr.Public(s1),hash,Convert.FromHexString(wrap.sig!)),"Forged Nostr event rejected");
+var changed=group with{Name="tampered group"};Check(!changed.Valid(),"Tampered group name rejected");
+var before=received.Count;var fake=new MeshPacket(2,alice.PeerId,Bytes.Utf8("forged public message"),Timestamp:(ulong)Bytes.Now,Signature:new byte[64]);await bob.Receive(fake.Encode());Check(received.Count==before,"Forged public mesh message rejected");
+Console.WriteLine($"TOTAL {passed} checks passed");
+var courier=reference.GetProperty("courier");byte[] C(string name)=>Convert.FromBase64String(courier.GetProperty(name).GetString()!);
+using(var oneWay=new NoiseHandshake(false,C("recipient_secret"),Bytes.Utf8("bitchat-courier-v1"),oneWay:true))
+{var clear=oneWay.Read(C("ciphertext"));Check(clear.SequenceEqual(C("payload")),"Actual Swift Noise X courier decryption");Check(oneWay.RemoteStatic!.SequenceEqual(Crypto.PublicX(C("sender_secret"))),"Actual Swift Noise X sender authentication");}
+using(var oneWay=new NoiseHandshake(true,C("sender_secret"),Bytes.Utf8("bitchat-courier-v1"),Enumerable.Repeat((byte)0x22,32).ToArray(),true,Crypto.PublicX(C("recipient_secret"))))
+Check(oneWay.Write(C("payload")).SequenceEqual(C("ciphertext")),"Actual Swift Noise X ciphertext re-encoding");
+var courierEnvelope=CourierEnvelope.Seal(Bytes.Utf8("offline message"),C("sender_secret"),Crypto.PublicX(C("recipient_secret")));
+Check(courierEnvelope.Open(C("recipient_secret")).Payload.SequenceEqual(Bytes.Utf8("offline message")),"Courier envelope roundtrip");
+var ids=Enumerable.Range(0,100).Select(i=>Crypto.Hash(BitConverter.GetBytes(i))[..16]).ToArray();var filter=GossipFilter.Build(ids);var values=filter.Values();Check(ids.All(id=>values.Contains(GossipFilter.Bucket(id,filter.M))),"Gossip membership has no false negatives");
+var embedded=NostrEmbedded.Decode(NostrEmbedded.Message("Nostr private", "nostr-message-id"));var pm=NostrEmbedded.PrivateMessage(embedded.Payload[1..]);Check(pm.Text=="Nostr private"&&pm.Id=="nostr-message-id"&&embedded.Recipient==null,"Nostr embedded private-message framing");
+var npub=Bech32.Encode("npub",Schnorr.Public(s1));Check(Bech32.Decode(npub,"npub").SequenceEqual(Schnorr.Public(s1)),"Nostr npub encoding/checksum");
+var verification=VerificationQr.Create(C("sender_secret"),seed,"alice",npub);Check(VerificationQr.Parse(verification.Url()).Noise==verification.Noise,"QR identity signature and freshness");
+Console.WriteLine($"TOTAL {passed} checks passed");
+var firstWire=new MeshPacket(2,new byte[]{1,2,3,4,5,6,7,8},Bytes.Utf8("first"),Timestamp:1000).Encode();
+var secondWire=new MeshPacket(2,new byte[]{8,7,6,5,4,3,2,1},Bytes.Utf8("second"),Timestamp:2000).Encode();var concatenated=Bytes.Join(firstWire,secondWire);var packetStream=new PacketStream();
+Check(packetStream.Add(concatenated).Count()==2,"BLE stream preserves consecutive unpadded frames");
+var chunked=new PacketStream();var streamFrames=new List<byte[]>();for(int i=0;i<concatenated.Length;i+=7)streamFrames.AddRange(chunked.Add(concatenated.Skip(i).Take(7).ToArray()));Check(streamFrames.Count==2,"BLE stream reassembles seven-byte notification chunks");
+var referenceGcs=reference.GetProperty("gcs");var referenceIds=Enumerable.Range(0,100).Select(i=>Crypto.Hash(Bytes.Utf8("id"+i))[..16]).ToArray();var referenceFilter=GossipFilter.Build(referenceIds);
+Check(referenceFilter.P==referenceGcs.GetProperty("p").GetInt32()&&referenceFilter.M==referenceGcs.GetProperty("m").GetUInt32()&&Convert.ToBase64String(referenceFilter.Data)==referenceGcs.GetProperty("data").GetString(),"Actual Swift gossip filter bytes");
+var board=BoardPost.Decode(Convert.FromBase64String(reference.GetProperty("board").GetString()!),1793740000001);Check(board.Content=="Swift board reference"&&board.Flags==1,"Actual Swift board signature and urgent flag");Check(Convert.ToBase64String(board.Encode())==reference.GetProperty("board").GetString(),"Actual Swift board re-encoding");
+var fakeCashu="cashuA"+Convert.ToBase64String(Bytes.Utf8("{\"token\":[{\"mint\":\"https://mint.example\",\"proofs\":[{\"amount\":5}]}]}")).TrimEnd('=').Replace('+','-').Replace('/','_');Check(Cashu.Decode(fakeCashu).Amount==5,"Cashu JSON amount parsing (synthetic token)");
+Console.WriteLine($"TOTAL {passed} checks passed");

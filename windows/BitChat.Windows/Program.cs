@@ -32,7 +32,7 @@ public static class Program
     }
 }
 
-public sealed class MainWindow:Window
+public sealed partial class MainWindow:Window
 {
     private readonly StateStore store;
     private AppController controller;
@@ -63,7 +63,7 @@ public sealed class MainWindow:Window
         var attach=Button("+",async()=>await Attach());attach.ToolTip="Send file, image or voice note (1 MiB)";DockPanel.SetDock(attach,Dock.Left);composer.Children.Add(attach);
         var voice=Button("mic",async()=>await Guard(async()=>{if(controller.IsRecording)await controller.EndVoice(false);else await controller.BeginVoice(conversation,false);}));voice.ToolTip="Click to record, click again to send";DockPanel.SetDock(voice,Dock.Left);composer.Children.Add(voice);
         var ptt=Button("hold to talk",()=>{});ptt.PreviewMouseLeftButtonDown+=async(_,e)=>{e.Handled=true;ptt.CaptureMouse();await Guard(()=>controller.BeginVoice(conversation,true));};ptt.PreviewMouseLeftButtonUp+=async(_,e)=>{e.Handled=true;ptt.ReleaseMouseCapture();await Guard(()=>controller.EndVoice(false));};DockPanel.SetDock(ptt,Dock.Left);composer.Children.Add(ptt);
-        input.Background=panel;input.Foreground=Brushes.WhiteSmoke;input.CaretBrush=green;input.BorderBrush=new SolidColorBrush(Color.FromRgb(48,63,70));input.Padding=new Thickness(10);input.KeyDown+=async(_,e)=>{if(e.Key==Key.Enter&&(Keyboard.Modifiers&ModifierKeys.Shift)==0){e.Handled=true;await Send();}};composer.Children.Add(input);DockPanel.SetDock(composer,Dock.Bottom);main.Children.Add(composer);
+        input.Background=panel;input.Foreground=Brushes.WhiteSmoke;input.CaretBrush=green;input.BorderBrush=new SolidColorBrush(Color.FromRgb(48,63,70));input.Padding=new Thickness(10);input.PreviewKeyDown+=async(_,e)=>{if(e.Key==Key.Enter&&(Keyboard.Modifiers&ModifierKeys.Shift)==0){e.Handled=true;await Send();}};composer.Children.Add(input);DockPanel.SetDock(composer,Dock.Bottom);main.Children.Add(composer);
         scroll=new ScrollViewer{Content=messages,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};main.Children.Add(scroll);
         try{tray.Icon=System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!);}catch{}tray.DoubleClick+=(_,_)=>Ui(RestoreFromTray);
         var trayMenu=new System.Windows.Forms.ContextMenuStrip();
@@ -104,7 +104,7 @@ public sealed class MainWindow:Window
         controller.ConfirmLegacyMedia=peer=>Task.FromResult(MessageBox.Show(this,"This contact ("+peer+") has not proved encrypted attachment support. Send this attachment without end-to-end encryption? Nearby relays may read it. This approval applies only to this send.","Legacy attachment",MessageBoxButton.YesNo,MessageBoxImage.Warning)==MessageBoxResult.Yes);
         controller.Status+=s=>Ui(()=>{status.Text=s;network.Text=$"BLE {controller.Bluetooth.Connections} · relays {controller.Relays.Connected}";});
         controller.PeersChanged+=()=>Ui(()=>{RefreshChannels();network.Text=$"BLE {controller.Bluetooth.Connections} · relays {controller.Relays.Connected} · nearby {controller.NearbyPresence}";});controller.TimelineChanged+=()=>Ui(()=>Select(conversation));
-        controller.Message+=m=>Ui(()=>{if(!m.Own&&!IsActive&&store.State.Notifications){var notification=NotificationContent.ForMessage(m.Sender,m.Text,store.State.HideNotificationPreviews);tray.ShowBalloonTip(5000,notification.Title,notification.Body,System.Windows.Forms.ToolTipIcon.Info);}if(m.Conversation==conversation){Append(m);scroll.ScrollToEnd();if(IsActive&&!m.Own&&m.Conversation.StartsWith("mesh:"))_=controller.MarkMeshRead(m);if(IsActive&&!m.Own&&m.Conversation.StartsWith("nostr:"))_=controller.MarkNostrRead(m.Conversation[6..],m.Id); }else if(!m.Own)status.Text=$"New message from {m.Sender}";RefreshChannels();});
+        controller.Message+=m=>Ui(()=>{if(!m.Own&&!IsActive&&store.State.Notifications){var notification=NotificationContent.ForMessage(m.Sender,m.Text,store.State.HideNotificationPreviews);tray.ShowBalloonTip(5000,notification.Title,notification.Body,System.Windows.Forms.ToolTipIcon.Info);}if(m.Conversation==conversation){Append(m);scroll.ScrollToEnd();if(CanMarkRead(m)&&!m.Own&&m.Conversation.StartsWith("mesh:"))_=controller.MarkMeshRead(m);if(IsActive&&!m.Own&&m.Conversation.StartsWith("nostr:"))_=controller.MarkNostrRead(m.Conversation[6..],m.Id); }else if(!m.Own)status.Text=$"New message from {m.Sender}";RefreshChannels();});
         controller.Receipt+=(id,value)=>Ui(()=>{if(receiptLabels.TryGetValue(id,out var label))label.Text=value;});
     }
     private void RefreshChannels()
@@ -128,7 +128,7 @@ public sealed class MainWindow:Window
         conversation=id;title.Text=id switch{"mesh"=>"# bluetooth mesh","board"=>"⌖ mesh board",_ when id.StartsWith("mesh:")=>"@ "+(controller.Peers.GetValueOrDefault(id[5..])?.Nickname??id[5..]),_ when id.StartsWith("group:")=>"# "+store.State.Groups[id].Name,_ when id.StartsWith("nostr:")=>"@ "+store.State.NostrPeers.GetValueOrDefault(id[6..],id[6..8]),_ when id.StartsWith("notes:")=>"⌖ notes #"+id[6..],_=>"# "+id[4..]};
         messages.Children.Clear();receiptLabels.Clear();StoredMessage[] history;lock(store.State.Messages)history=store.State.Messages.Where(m=>m.Conversation==id).OrderBy(m=>m.Timestamp).TakeLast(500).ToArray();foreach(var m in history)Append(m);
         if(history.Length==0)messages.Children.Add(new TextBlock{Text=id=="mesh"?"Messages travel through nearby devices over Bluetooth LE.\nChoose a location channel to chat over Nostr relays.":"No messages yet.",Foreground=muted,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,20,0,20)});
-        foreach(var message in history.Where(m=>!m.Own&&m.Status!="read"&&m.Conversation.StartsWith("mesh:")))_=controller.MarkMeshRead(message);
+        foreach(var message in history.Where(m=>CanMarkRead(m)&&!m.Own&&m.Status!="read"&&m.Conversation.StartsWith("mesh:")))_=controller.MarkMeshRead(message);
         RefreshChannels();scroll.ScrollToEnd();input.Focus();
     }
     private void Append(StoredMessage m)
@@ -140,16 +140,20 @@ public sealed class MainWindow:Window
         var text=new TextBox{Text=m.Text,IsReadOnly=true,TextWrapping=TextWrapping.Wrap,BorderThickness=new Thickness(0),Background=Brushes.Transparent,Foreground=Brushes.WhiteSmoke,Padding=new Thickness(0,4,0,0)};block.Children.Add(text);
         if(m.Conversation=="board"&&m.Own)block.Children.Add(Button("delete note",async()=>await Guard(async()=>{await controller.DeleteBoard(m.Id);Select("board");})));
         try{if(m.Text.StartsWith("cashu")){var token=Cashu.Decode(m.Text);block.Children.Add(Button($"{token.Amount} {token.Unit} · {token.Mint} · copy token",()=>Clipboard.SetText(token.Token)));}}catch{}
+        if(IsImage(m))block.Children.Add(ImageAttachment(m));
         if(m.Attachment!=null&&m.Mime?.StartsWith("audio/")==true)block.Children.Add(Button("play voice note",async()=>await Guard(()=>PlayAudio(m))));
         if(m.Attachment!=null)block.Children.Add(Button("save attachment · "+m.Text,()=>ExportAttachment(m)));
         messages.Children.Add(block);
     }
     private async Task Guard(Func<Task> action)
     {try{await action();}catch(Exception e){status.Text=e.Message;}}
+    private bool sending;
     private async Task Send()
     {
-        string text=input.Text.Trim();if(text.Length==0)return;
-        await Guard(async()=>{if(text.StartsWith('/'))await Command(text);else await controller.Send(conversation,text);input.Clear();});
+        if(sending)return;string original=input.Text,text=original.Trim();if(text.Length==0)return;
+        sending=true;
+        try{await Guard(async()=>{if(text.StartsWith('/'))await Command(text);else await controller.Send(conversation,text);if(input.Text==original)input.Clear();});}
+        finally{sending=false;}
     }
     private async Task Command(string text)
     {

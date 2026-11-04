@@ -25,6 +25,7 @@ public sealed class WireReader(byte[] bytes)
     public byte[] Read(int count) { if (count < 0 || count > Remaining) throw new InvalidDataException("Truncated packet"); var b=bytes.AsSpan(offset,count).ToArray(); offset+=count; return b; }
     public byte Byte() => Read(1)[0];
     public ushort U16() => BinaryPrimitives.ReadUInt16BigEndian(Read(2));
+    public uint PeekU32(){if(Remaining<4)throw new InvalidDataException("Truncated packet");return BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(offset,4));}
     public uint U32() => BinaryPrimitives.ReadUInt32BigEndian(Read(4));
     public ulong U64() => BinaryPrimitives.ReadUInt64BigEndian(Read(8));
     public string ShortString() => Bytes.Text(Read(Byte()));

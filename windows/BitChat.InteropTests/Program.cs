@@ -169,3 +169,23 @@ foreach(int attPayload in new[]{64,128})
     Check(count<=8192,$"One-MiB central transfer stays within receiver fragment quota on {attPayload}-byte ATT link");
 }
 Console.WriteLine($"TOTAL {passed} checks passed");
+
+foreach(var imageReference in reference.GetProperty("image_files").EnumerateArray())
+{
+    byte[] expected=Convert.FromBase64String(imageReference.GetProperty("content").GetString()!);
+    var decodedImage=MediaPacket.Decode(Convert.FromBase64String(imageReference.GetProperty("file").GetString()!));
+    Check(decodedImage.Content.SequenceEqual(expected)&&decodedImage.Mime=="image/png","Actual Swift image file payload: "+imageReference.GetProperty("format").GetString());
+    using var receiver=new MeshEngine(RandomNumberGenerator.GetBytes(32),RandomNumberGenerator.GetBytes(32),"Windows",_=>Task.FromResult(1));
+    byte[] publicNoise=Convert.FromBase64String(imageReference.GetProperty("noise_public").GetString()!);string imagePeer=Bytes.Hex(Crypto.Hash(publicNoise)[..8]);
+    receiver.RestorePeer(new(imagePeer,"Swift image sender",publicNoise,Crypto.PublicEd(Convert.FromBase64String(reference.GetProperty("seed").GetString()!)),[0],0));
+    MediaPacket? receivedImage=null;receiver.Media+=(_,file,_)=>receivedImage=file;
+    var signedImage=MeshPacket.Decode(Convert.FromBase64String(imageReference.GetProperty("wire").GetString()!));
+    foreach(var fragment in FragmentAssembler.Split(signedImage,128))await receiver.Receive(fragment.Encode());
+    Check(receivedImage?.Content.SequenceEqual(expected)==true,"Fragmented signed Swift image reaches Windows media receiver: "+imageReference.GetProperty("format").GetString());
+}
+foreach(byte[] legacyContent in new byte[][]{[],[42],[42,43]})
+{
+    var encodedLegacy=Bytes.Join([4],Bytes.U16((ushort)legacyContent.Length),legacyContent);
+    Check(MediaPacket.Decode(encodedLegacy).Content.SequenceEqual(legacyContent),"Legacy image/file content length edge: "+legacyContent.Length);
+}
+Console.WriteLine($"TOTAL {passed} checks passed");

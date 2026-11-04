@@ -20,3 +20,7 @@ Central write fixtures run the unmodified upstream BLEInboundWriteBuffer.swift
 with correctly offset prepare-write chunks and with independent offset-zero
 writes. This documents why notification stream chunking must not be applied to
 Windows-to-iOS characteristic writes.
+
+Image fixtures call actual BitchatFilePacket.encode/decode with a real PNG, then
+sign public v2 file packets using the upstream BitchatPacket signing bytes. The
+legacy UInt16 CONTENT / UInt64 FILE_SIZE payload is accepted by the actual Swift decoder.

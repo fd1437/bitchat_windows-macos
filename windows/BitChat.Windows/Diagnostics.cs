@@ -102,6 +102,7 @@ public static class Diagnostics
             if(window.IsVisible)throw new InvalidOperationException("Closing must hide the window");
             window.RestoreFromTray();
             if(!window.IsVisible)throw new InvalidOperationException("Tray restore must reopen the same window");
+            window.VerifyComposerKeyHandling();window.VerifyImageReveal();
             var content=(FrameworkElement)window.Content;content.Measure(new Size(1120,780));content.Arrange(new Rect(0,0,1120,780));content.UpdateLayout();
             var render=new RenderTargetBitmap(1120,780,96,96,PixelFormats.Pbgra32);render.Render(content);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(render));using var stream=File.Create(path);encoder.Save(stream);
         }

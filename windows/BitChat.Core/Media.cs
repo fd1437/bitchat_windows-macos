@@ -11,13 +11,21 @@ public sealed record MediaPacket(string Name,string Mime,byte[] Content)
     }
     public static MediaPacket Decode(byte[] bytes)
     {
-        var r=new WireReader(bytes);string name="attachment",mime="application/octet-stream";byte[]? content=null;ulong? declared=null;
+        var r=new WireReader(bytes);string name="attachment",mime="application/octet-stream";using var content=new MemoryStream();bool hasContent=false;ulong? declared=null;
         while(r.Remaining>0)
         {
-            byte t=r.Byte();uint n=t==4?r.U32():r.U16();if(n>MaxBytes)throw new InvalidDataException("Oversized media");var b=r.Read((int)n);
-            switch(t){case 1:name=Bytes.Text(b);break;case 2:var size=new WireReader(b);declared=b.Length==4?size.U32():b.Length==8?size.U64():throw new InvalidDataException("Invalid file size");break;case 3:mime=Bytes.Text(b);break;case 4:content=b;break;}
+            byte t=r.Byte();uint n;
+            if(t==4)
+            {
+                // Swift accepts canonical UInt32 lengths, then falls back to
+                // the legacy UInt16 CONTENT length when UInt32 cannot fit.
+                n=r.Remaining>=4&&r.PeekU32()<=r.Remaining-4?r.U32():r.U16();
+            }
+            else n=r.U16();
+            if(n>MaxBytes)throw new InvalidDataException("Oversized media");var b=r.Read((int)n);
+            switch(t){case 1:name=Bytes.Text(b);break;case 2:var size=new WireReader(b);declared=b.Length==4?size.U32():b.Length==8?size.U64():throw new InvalidDataException("Invalid file size");break;case 3:mime=Bytes.Text(b);break;case 4:if(content.Length+b.Length>MaxBytes)throw new InvalidDataException("Oversized media");content.Write(b);hasContent=true;break;}
         }
-        if(content==null||content.Length>MaxBytes||(declared!=null&&declared!=(ulong)content.Length))throw new InvalidDataException("Attachment length mismatch");return new(name,mime,content);
+        if(!hasContent||content.Length>MaxBytes||(declared!=null&&declared!=(ulong)content.Length))throw new InvalidDataException("Attachment length mismatch");return new(name,mime,content.ToArray());
     }
 }
 

@@ -63,4 +63,20 @@ for mtu in [20,61,182,244,512] {
     writeFixtures.append(["att_payload":mtu,"wire":writeWire.base64EncodedString(),"payload":packets[3]["payload"]!,"accepted_offsets":accepted,"accepted_offset_zero":offsetZeroAccepted])
 }
 output["central_write_offsets"]=writeFixtures
+
+let imageContent=Data(base64Encoded:"iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGOwWZCHFTEMLQkAMChSgdtUpbYAAAAASUVORK5CYII=")!
+let imageName="img_12345678-1234-1234-1234-123456789ABC.png"
+let canonicalImage=BitchatFilePacket(fileName:imageName,fileSize:UInt64(imageContent.count),mimeType:"image/png",content:imageContent).encode()!
+func imageTlv(_ tag:UInt8,_ value:Data)->Data { var result=Data([tag,UInt8(value.count>>8),UInt8(value.count&255)]);result.append(value);return result }
+var legacyImage=imageTlv(1,Data(imageName.utf8));legacyImage.append(imageTlv(2,Data([0,0,0,0,0,0,0,UInt8(imageContent.count)])));legacyImage.append(imageTlv(3,Data("image/png".utf8)));legacyImage.append(imageTlv(4,imageContent))
+let imageNoisePublic=courierSender.publicKey.rawRepresentation
+let imageSender=Data(SHA256.hash(data:imageNoisePublic)).prefix(8)
+var imageFixtures:[[String:Any]]=[]
+for (name,encoded) in [("canonical",canonicalImage),("legacy",legacyImage)] {
+    precondition(BitchatFilePacket.decode(encoded)?.content==imageContent)
+    var imagePacket=BitchatPacket(type:0x22,senderID:imageSender,recipientID:nil,timestamp:1793740000000,payload:encoded,signature:nil,ttl:7,version:2)
+    imagePacket.signature=try key.signature(for:imagePacket.toBinaryDataForSigning()!)
+    imageFixtures.append(["format":name,"file":encoded.base64EncodedString(),"wire":imagePacket.toBinaryData(padding:false)!.base64EncodedString(),"content":imageContent.base64EncodedString(),"noise_public":imageNoisePublic.base64EncodedString()])
+}
+output["image_files"]=imageFixtures
 try JSONSerialization.data(withJSONObject:output,options:[.prettyPrinted,.sortedKeys]).write(to:URL(fileURLWithPath:CommandLine.arguments[1]))

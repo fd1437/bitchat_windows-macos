@@ -2,6 +2,8 @@ param([string]$Output = (Join-Path $PSScriptRoot 'publish'))
 $ErrorActionPreference = 'Stop'
 Push-Location $PSScriptRoot
 try {
+    ./build-zlib.ps1 -Rid win-x64
+    ./build-zlib.ps1 -Rid win-arm64
     dotnet run --project BitChat.InteropTests -c Release
     if ($LASTEXITCODE) { throw 'Interoperability tests failed' }
     foreach ($rid in @('win-x64', 'win-arm64')) {

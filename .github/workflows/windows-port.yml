@@ -26,6 +26,9 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+      - name: Build deterministic reference zlib
+        shell: pwsh
+        run: ./windows/build-zlib.ps1 -Rid ${{ matrix.rid }}
       - name: Wire and cryptography interoperability
         shell: pwsh
         run: dotnet run --project windows/BitChat.InteropTests -c Release

@@ -40,7 +40,7 @@ public sealed class MainWindow:Window
     {
         tray.Visible=!diagnostics;
         this.store=store;controller=new(store);Title="bitchat · Windows";Width=1120;Height=780;MinWidth=780;MinHeight=520;Background=bg;Foreground=Brushes.WhiteSmoke;FontFamily=new FontFamily("Cascadia Mono, Consolas");FontSize=13;
-        var root=new Grid();root.ColumnDefinitions.Add(new(){Width=new GridLength(240)});root.ColumnDefinitions.Add(new(){Width=new GridLength(1,GridUnitType.Star)});Content=root;
+        var root=new Grid{Background=bg};root.ColumnDefinitions.Add(new(){Width=new GridLength(240)});root.ColumnDefinitions.Add(new(){Width=new GridLength(1,GridUnitType.Star)});Content=root;
         var sidebar=new DockPanel{Background=panel,Margin=new Thickness(0,0,1,0)};root.Children.Add(sidebar);
         var brand=new Button{Content="bitchat",Foreground=green,Background=Brushes.Transparent,BorderThickness=new Thickness(0),FontSize=28,FontWeight=FontWeights.Bold,HorizontalContentAlignment=HorizontalAlignment.Left,Padding=new Thickness(20)};
         brand.ToolTip="Triple-click to wipe local identities and messages";brand.Click+=async(_,_)=>await PanicTap();DockPanel.SetDock(brand,Dock.Top);sidebar.Children.Add(brand);

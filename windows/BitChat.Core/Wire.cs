@@ -42,7 +42,7 @@ public sealed record MeshPacket(byte Type, byte[] Sender, byte[] Payload, byte[]
         if (route && (Route!.Length>255 || Route.Any(x=>x.Length!=8))) throw new InvalidDataException("Invalid route");
         var payload=Payload; bool compressed=false; int unique=Payload.Distinct().Count();
         if(Payload.Length>=100 && (Version==2||Payload.Length<=65535) && unique/(double)Math.Min(Payload.Length,256)<0.9)
-        { using var output=new MemoryStream(); using(var deflate=new DeflateStream(output,CompressionLevel.Optimal,true))deflate.Write(Payload);var c=output.ToArray();if(c.Length<Payload.Length){payload=Bytes.Join(Version==2?Bytes.U32((uint)Payload.Length):Bytes.U16(checked((ushort)Payload.Length)),c);compressed=true;} }
+        { var c=CanonicalDeflate.Encode(Payload);if(c.Length<Payload.Length){payload=Bytes.Join(Version==2?Bytes.U32((uint)Payload.Length):Bytes.U16(checked((ushort)Payload.Length)),c);compressed=true;} }
         byte flags=(byte)((Recipient!=null?1:0)|(Signature!=null?2:0)|(route?8:0)|(IsRsr?16:0)|(compressed?4:0));
         var parts = new List<byte[]> { new byte[]{Version,Type,Ttl}, Bytes.U64(Timestamp), new byte[]{flags}, Version==2?Bytes.U32((uint)payload.Length):Bytes.U16(checked((ushort)payload.Length)), Sender };
         if(Recipient!=null) parts.Add(Recipient);

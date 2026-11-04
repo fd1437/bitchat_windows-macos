@@ -3,7 +3,7 @@
     "version": "9.0.2",
     "source": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
     "source_sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
-    "binary_sha256": "20882916f926f8ea015f652de6f55d66e10de34244a4ad03cb53531ce4a84c02",
+    "binary_sha256": "d271fb813bf40df6eb97f31531c0c486878f18e8d3f431d4c39608424847d8c6",
     "recipe": "build-codec.sh",
     "license": "LGPL-2.1-or-later"
   },
@@ -13,5 +13,12 @@
     "bundle_sha256": "2ee123e9167318a3742778ff704e75f01d4780f05a14522d451fe011011077c4",
     "binary_sha256": "1607d98f5d13859077b1b349c55beba76b09acc788f0431fd824d11966fb1074",
     "notices": "vendor/tor/notices/"
+  },
+  "zlib": {
+    "version": "1.3.2",
+    "source": "https://zlib.net/zlib-1.3.2.tar.gz",
+    "source_sha256": "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
+    "recipe": "build-zlib.ps1",
+    "purpose": "stable canonical deflate bytes for Swift packet signatures"
   }
 }

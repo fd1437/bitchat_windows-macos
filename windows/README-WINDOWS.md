@@ -58,8 +58,10 @@ edge cases are not yet at full parity. English is the current Windows UI languag
 
 ## Build / native diagnostics
 
-Install .NET SDK 8 and NSIS 3.13, then run `./build.ps1` from PowerShell. Or:
+Install .NET SDK 8, CMake/Visual Studio C++ build tools, and NSIS 3.13, then run `./build.ps1` from PowerShell. Or:
 
+    ./build-zlib.ps1 -Rid win-x64
+    ./build-zlib.ps1 -Rid win-arm64
     dotnet run --project BitChat.InteropTests -c Release
     dotnet publish BitChat.Windows -c Release -r win-x64 -o publish/win-x64
     dotnet publish BitChat.Windows -c Release -r win-arm64 -o publish/win-arm64

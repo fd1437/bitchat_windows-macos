@@ -1,4 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><TargetFramework>net8.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><LangVersion>latest</LangVersion></PropertyGroup>
   <ItemGroup><PackageReference Include="System.Formats.Cbor" Version="8.0.0" /><PackageReference Include="NBitcoin.Secp256k1" Version="4.0.4" /><PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" /></ItemGroup>
+<ItemGroup><Content Include="../vendor/zlib/win-x64/bitchat_zlib.dll" Link="native/win-x64/bitchat_zlib.dll" Condition="Exists('../vendor/zlib/win-x64/bitchat_zlib.dll')" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" /><Content Include="../vendor/zlib/win-arm64/bitchat_zlib.dll" Link="native/win-arm64/bitchat_zlib.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" Condition="Exists('../vendor/zlib/win-arm64/bitchat_zlib.dll')" /></ItemGroup>
 </Project>

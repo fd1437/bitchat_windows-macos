@@ -44,9 +44,14 @@ Section "BitChat" SecMain
   SetOutPath "$INSTDIR"
   ${If} ${IsNativeARM64}
     File /oname=BitChat.exe "${PAYLOAD}/win-arm64/BitChat.exe"
+    SetOutPath "$INSTDIR\native\win-arm64"
+    File "${PAYLOAD}/win-arm64/native/win-arm64/bitchat_zlib.dll"
   ${Else}
     File /oname=BitChat.exe "${PAYLOAD}/win-x64/BitChat.exe"
+    SetOutPath "$INSTDIR\native\win-x64"
+    File "${PAYLOAD}/win-x64/native/win-x64/bitchat_zlib.dll"
   ${EndIf}
+  SetOutPath "$INSTDIR"
   File /oname=LICENSE.txt "../LICENSE"
   File "README-WINDOWS.md"
   File "THIRD-PARTY-NOTICES.txt"
@@ -71,6 +76,7 @@ Section "BitChat" SecMain
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\BitChat" "NoRepair" 1
 SectionEnd
 Section "Uninstall"
+  RMDir /r "$INSTDIR\native"
   RMDir /r "$INSTDIR\licenses"
   RMDir /r "$INSTDIR\tor"
   RMDir /r "$INSTDIR\media"

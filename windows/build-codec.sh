@@ -13,7 +13,7 @@ cd "$codec_build/windows"
   --disable-everything --disable-doc --disable-autodetect --enable-ffmpeg \
   --disable-ffprobe --disable-ffplay --disable-network --enable-protocol=file,pipe \
   --enable-encoder=aac,pcm_s16le --enable-decoder=aac,pcm_s16le,pcm_f32le \
-  --enable-muxer=adts,ipod,wav,s16le --enable-demuxer=aac,wav,s16le,f32le,mov \
+  --enable-muxer=adts,ipod,wav,pcm_s16le --enable-demuxer=aac,wav,pcm_s16le,pcm_f32le,mov \
   --enable-parser=aac --enable-filter=aresample,aformat,anull --enable-swresample \
   --enable-small --disable-debug --enable-static --disable-shared \
   --disable-x86asm --extra-ldflags=-static

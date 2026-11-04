@@ -20,3 +20,7 @@ configuration are installed in media/. Corresponding source is distributed
 with the installer in media/source/ffmpeg-9.0.2.tar.xz.
 Official source: https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
 Source SHA256: 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
+
+Reference zlib 1.3.2: zlib license. Source and Windows DLL build recipe
+are included under vendor/zlib and build-zlib.ps1. No platform compression
+heuristics are used for canonical packet signatures on Windows.

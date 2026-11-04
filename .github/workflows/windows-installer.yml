@@ -1,0 +1,100 @@
+name: Windows offline installer
+on:
+  push:
+    branches: [codex/windows-native-port]
+    paths: ['.github/workflows/windows-installer.yml']
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: Successful Windows port validation run ID (blank uses latest branch run)
+        required: false
+        type: string
+permissions:
+  contents: read
+  actions: read
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select validated Windows builds
+        id: source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_RUN: ${{ inputs.source_run }}
+        run: |
+          $id = $env:REQUESTED_RUN
+          if (!$id) { $id = gh run list -R $env:GITHUB_REPOSITORY --workflow windows-port.yml --branch $env:GITHUB_REF_NAME --limit 1 --json databaseId --jq '.[0].databaseId' }
+          if ($id -notmatch '^\d+$') { throw 'A Windows validation run is required' }
+          gh run watch $id -R $env:GITHUB_REPOSITORY --exit-status --interval 10
+          if ($LASTEXITCODE) { throw 'Native Windows validation did not pass' }
+          "run_id=$id" >> $env:GITHUB_OUTPUT
+      - uses: actions/download-artifact@v4
+        with:
+          name: BitChat-win-x64
+          path: windows/ci-publish/win-x64
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: BitChat-win-arm64
+          path: windows/ci-publish/win-arm64
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Build unsigned offline installer
+        shell: pwsh
+        run: |
+          choco install nsis --yes --no-progress
+          if ($LASTEXITCODE) { throw 'NSIS installation failed' }
+          $payload = Join-Path $env:GITHUB_WORKSPACE 'windows/ci-publish'
+          $output = Join-Path $env:RUNNER_TEMP 'BitChat-Setup-unsigned.exe'
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" "/DPAYLOAD=$payload" "/DOUTPUT=$output" windows/installer.nsi
+          if ($LASTEXITCODE) { throw 'NSIS packaging failed' }
+          if ((Get-AuthenticodeSignature $output).Status -ne 'NotSigned') { throw 'Installer must be unsigned' }
+          (Get-FileHash $output -Algorithm SHA256).Hash.ToLowerInvariant() + '  BitChat-Setup-unsigned.exe' | Set-Content "$output.sha256.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BitChat-Setup-unsigned
+          path: ${{ runner.temp }}/BitChat-Setup-unsigned.exe*
+  install:
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+          - os: windows-11-arm
+            rid: win-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: BitChat-Setup-unsigned
+          path: installer
+      - name: Test one-step offline install and uninstall
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:GITHUB_WORKSPACE 'installer/BitChat-Setup-unsigned.exe'
+          $install = Join-Path $env:LOCALAPPDATA 'BitChat-CI-${{ matrix.rid }}'
+          $p = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$install") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Installer exit code: $($p.ExitCode)" }
+          foreach ($file in @('BitChat.exe', 'media/ffmpeg.exe', 'tor/tor.exe', 'native/${{ matrix.rid }}/bitchat_zlib.dll', 'Uninstall.exe')) {
+            if (!(Test-Path (Join-Path $install $file))) { throw "Missing installed file: $file" }
+          }
+          $report = Join-Path $env:RUNNER_TEMP 'Installed-BitChat-${{ matrix.rid }}.json'
+          $p = Start-Process -FilePath (Join-Path $install 'BitChat.exe') -ArgumentList @('--self-test', $report) -Wait -PassThru
+          if (Test-Path $report) { Get-Content $report }
+          if (Test-Path "$report.error.txt") { Get-Content "$report.error.txt" }
+          if ($p.ExitCode -ne 0) { throw "Installed native self-test failed: $($p.ExitCode)" }
+          if ((Get-AuthenticodeSignature (Join-Path $install 'BitChat.exe')).Status -ne 'NotSigned') { throw 'Application must be unsigned' }
+          $p = Start-Process -FilePath (Join-Path $install 'Uninstall.exe') -ArgumentList @('/S', "_?=$install") -Wait -PassThru
+          if (Test-Path (Join-Path $install 'BitChat.exe')) { throw 'Uninstaller did not remove the app' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installed-diagnostics-${{ matrix.rid }}
+          path: ${{ runner.temp }}/Installed-BitChat-${{ matrix.rid }}.*

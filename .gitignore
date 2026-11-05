@@ -80,4 +80,23 @@ build.log
 
 # Local configs
 Local.xcconfig
+
+# Private runtime data must never enter a source archive or release.
+*.dpapi
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.keychain
+*.keychain-db
+*.pfx
+*.p12
+.env
+.env.local
+state.json
+messages.json
+history.json
+notification-previews/
+clipboard/
+ci-publish/
 *.profraw

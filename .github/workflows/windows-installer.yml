@@ -18,6 +18,9 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Select validated Windows builds
         id: source
         shell: pwsh
@@ -30,6 +33,8 @@ jobs:
           if ($id -notmatch '^\d+$') { throw 'A Windows validation run is required' }
           gh run watch $id -R $env:GITHUB_REPOSITORY --exit-status --interval 10
           if ($LASTEXITCODE) { throw 'Native Windows validation did not pass' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$id" | ConvertFrom-Json
+          if ($LASTEXITCODE -or $run.head_sha -ne $env:GITHUB_SHA -or $run.head_repository.full_name -ne $env:GITHUB_REPOSITORY -or $run.path -ne '.github/workflows/windows-port.yml' -or $run.conclusion -ne 'success') { throw 'Installer requires validated artifacts from this exact repository, workflow and commit' }
           "run_id=$id" >> $env:GITHUB_OUTPUT
       - uses: actions/download-artifact@v4
         with:
@@ -49,7 +54,12 @@ jobs:
           choco install nsis --yes --no-progress
           if ($LASTEXITCODE) { throw 'NSIS installation failed' }
           $payload = Join-Path $env:GITHUB_WORKSPACE 'windows/ci-publish'
-          Get-ChildItem $payload -Recurse | Select-Object FullName, Length
+          python scripts/audit_release.py source
+          if ($LASTEXITCODE) { throw 'Source privacy audit failed' }
+          foreach ($rid in @('win-x64', 'win-arm64')) {
+            python scripts/audit_release.py windows --root (Join-Path $payload $rid) --rid $rid --report (Join-Path $env:RUNNER_TEMP "SECURITY-$rid.json")
+            if ($LASTEXITCODE) { throw "Payload privacy audit failed: $rid" }
+          }
           $output = Join-Path $env:RUNNER_TEMP 'BitChat-Setup-unsigned.exe'
           & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" "/DPAYLOAD=$payload" "/DOUTPUT=$output" windows/installer.nsi
           if ($LASTEXITCODE) { throw 'NSIS packaging failed' }
@@ -59,6 +69,10 @@ jobs:
         with:
           name: BitChat-Setup-unsigned
           path: ${{ runner.temp }}/BitChat-Setup-unsigned.exe*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-security
+          path: ${{ runner.temp }}/SECURITY-*.json
   install:
     needs: package
     strategy:

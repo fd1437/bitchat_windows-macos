@@ -5,7 +5,8 @@ Source baseline: `fd1437/bitchat_windows-macos` commit
 
 The SwiftUI/CoreBluetooth app cannot be directly compiled for Windows. This
 port implements its wire protocols in C#/.NET 8, with WPF and Windows BLE.
-The original Swift application remains unchanged.
+The Swift application remains a separate native client; the macOS package has
+its own appearance and lifecycle changes.
 
 ## Install
 
@@ -151,6 +152,28 @@ Bridge courier tests exercise simulated transports; physical relay-to-BLE
 interoperability still requires device testing. English is the current Windows UI language.
 
 ## Build / native diagnostics
+
+### Release privacy boundary (0.1.9)
+
+Official Windows installers use fresh GitHub runners. A source audit rejects
+tracked profile databases and common credential formats and verifies the bundled
+dependency digests. An explicit payload allowlist rejects extra files (including
+history, profiles, debug symbols and logs). Payload digests must remain unchanged
+after native diagnostics. NSIS uses explicit file names instead of recursive
+directory imports. Packaging requires validated artifacts from the exact same
+repository, validation workflow and commit as the installer. NuGet audits include
+transitive packages and fail the build on reported vulnerabilities or feed errors.
+
+A fresh-profile diagnostic verifies empty history, independently generated keys
+and preservation of an existing synthetic profile. Reinstalling on an existing
+PC intentionally preserves `%LOCALAPPDATA%/BitChat`; messages returning after an
+upgrade are not evidence that the installer bundled them. Build diagnostics use
+temporary profiles and synthetic data. Security reports contain paths and hashes,
+never conversation text or keys. The update downloader also requires assets from
+the matching release in `fd1437/bitchat_windows-macos`, not another GitHub project.
+
+These checks enforce the packaging boundary; they are not a full independent
+cryptographic audit or a guarantee against every vulnerability.
 
 Install .NET SDK 8, CMake/Visual Studio C++ build tools, and NSIS 3.13, then run `./build.ps1` from PowerShell. Or:
 

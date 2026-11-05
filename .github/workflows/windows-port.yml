@@ -5,6 +5,8 @@ on:
     paths:
       - 'windows/**'
       - '.github/workflows/windows-port.yml'
+      - 'scripts/audit_release.py'
+      - 'scripts/tests/test_audit_release.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -23,6 +25,15 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reject profile data, credentials and unpinned dependencies
+        run: |
+          python scripts/audit_release.py source --report "${{ runner.temp }}/SECURITY-source.json"
+          if ($LASTEXITCODE) { throw 'Source privacy audit failed' }
+          python -m unittest discover -s scripts/tests -p test_audit_release.py -v
+          if ($LASTEXITCODE) { throw 'Privacy boundary tests failed' }
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -40,11 +51,20 @@ jobs:
         run: |
           $report = Join-Path $env:RUNNER_TEMP "BitChat-${{ matrix.rid }}.json"
           $exe = Join-Path $env:GITHUB_WORKSPACE "windows/publish/${{ matrix.rid }}/BitChat.exe"
+          $audit = Join-Path $env:RUNNER_TEMP 'SECURITY-${{ matrix.rid }}.json'
+          python scripts/audit_release.py windows --root "windows/publish/${{ matrix.rid }}" --rid ${{ matrix.rid }} --report $audit
+          if ($LASTEXITCODE) { throw 'Unexpected files in release payload' }
           $p = Start-Process -FilePath $exe -ArgumentList @('--self-test', $report) -Wait -PassThru
           if (Test-Path $report) { Get-Content $report }
           if (Test-Path "$report.error.txt") { Get-Content "$report.error.txt" }
           if ($p.ExitCode -ne 0) { throw "BitChat native self-test failed: $($p.ExitCode)" }
           if (!(Test-Path $report)) { throw "The native process did not produce a diagnostic report" }
+          python scripts/audit_release.py windows --root "windows/publish/${{ matrix.rid }}" --rid ${{ matrix.rid }} --compare $audit
+          if ($LASTEXITCODE) { throw 'Native tests modified the release payload' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-security-${{ matrix.rid }}
+          path: ${{ runner.temp }}/SECURITY-*.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

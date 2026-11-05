@@ -73,11 +73,14 @@ internal sealed class ReleaseUpdater(StateStore store,HttpMessageHandler? handle
             if(name.Equals("BitChat-Setup-unsigned.exe",StringComparison.OrdinalIgnoreCase))setup=url;
             if(name.Equals("BitChat-Setup-unsigned.exe.sha256.txt",StringComparison.OrdinalIgnoreCase))checksum=url;
         }
-        if(setup==null||checksum==null||!IsGithubUrl(setup)||!IsGithubUrl(checksum))return null;
-        return new(tag,version.ToString(3),setup,checksum,release.GetProperty("html_url").GetString()??"https://github.com/fd1437/bitchat_windows-macos/releases",version);
+        if(setup==null||checksum==null||!IsReleaseAssetUrl(setup,tag,"BitChat-Setup-unsigned.exe")||!IsReleaseAssetUrl(checksum,tag,"BitChat-Setup-unsigned.exe.sha256.txt"))return null;
+        return new(tag,version.ToString(3),setup,checksum,"https://github.com/fd1437/bitchat_windows-macos/releases/tag/"+Uri.EscapeDataString(tag),version);
     }
 
-    private static bool IsGithubUrl(string value)=>Uri.TryCreate(value,UriKind.Absolute,out var uri)&&uri.Scheme==Uri.UriSchemeHttps&&uri.Host.Equals("github.com",StringComparison.OrdinalIgnoreCase);
+    internal static bool IsReleaseAssetUrl(string value,string tag,string asset)=>
+        Uri.TryCreate(value,UriKind.Absolute,out var uri)&&uri.Scheme==Uri.UriSchemeHttps&&uri.IsDefaultPort&&
+        uri.Host.Equals("github.com",StringComparison.OrdinalIgnoreCase)&&uri.UserInfo.Length==0&&uri.Query.Length==0&&uri.Fragment.Length==0&&
+        uri.AbsolutePath.Equals("/fd1437/bitchat_windows-macos/releases/download/"+Uri.EscapeDataString(tag)+"/"+asset,StringComparison.Ordinal);
     private static bool IsReleaseDownloadHost(Uri uri)=>uri.Scheme==Uri.UriSchemeHttps&&(uri.Host.Equals("github.com",StringComparison.OrdinalIgnoreCase)||uri.Host.EndsWith(".githubusercontent.com",StringComparison.OrdinalIgnoreCase));
     private static async Task CopyLimitedAsync(Stream source,Stream target,long limit,CancellationToken cancellation,Action<long>? progress=null)
     {
@@ -89,13 +92,13 @@ internal sealed class ReleaseUpdater(StateStore store,HttpMessageHandler? handle
     {
         Version? version=ParseTagVersion(store.State.UpdateTag);
         if(version==null||version<=CurrentVersion||store.State.UpdateSetupUrl==null||store.State.UpdateChecksumUrl==null)return null;
-        if(!IsGithubUrl(store.State.UpdateSetupUrl)||!IsGithubUrl(store.State.UpdateChecksumUrl))return null;
-        return new(store.State.UpdateTag!,version.ToString(3),store.State.UpdateSetupUrl,store.State.UpdateChecksumUrl,store.State.UpdateReleaseUrl??"https://github.com/fd1437/bitchat_windows-macos/releases",version);
+        if(!IsReleaseAssetUrl(store.State.UpdateSetupUrl,store.State.UpdateTag!,"BitChat-Setup-unsigned.exe")||!IsReleaseAssetUrl(store.State.UpdateChecksumUrl,store.State.UpdateTag!,"BitChat-Setup-unsigned.exe.sha256.txt"))return null;
+        return new(store.State.UpdateTag!,version.ToString(3),store.State.UpdateSetupUrl,store.State.UpdateChecksumUrl,"https://github.com/fd1437/bitchat_windows-macos/releases/tag/"+Uri.EscapeDataString(store.State.UpdateTag!),version);
     }
 
     public async Task<string> DownloadVerifiedAsync(AvailableUpdate update,IProgress<DownloadProgress>? progress=null,CancellationToken cancellation=default)
     {
-        if(!IsGithubUrl(update.SetupUrl)||!IsGithubUrl(update.ChecksumUrl))throw new InvalidDataException("The release download URL is not a trusted GitHub HTTPS URL");
+        if(!IsReleaseAssetUrl(update.SetupUrl,update.Tag,"BitChat-Setup-unsigned.exe")||!IsReleaseAssetUrl(update.ChecksumUrl,update.Tag,"BitChat-Setup-unsigned.exe.sha256.txt"))throw new InvalidDataException("The update must come from the matching release in fd1437/bitchat_windows-macos");
         string directory=Path.Combine(StateStore.Root,"updates");Directory.CreateDirectory(directory);
         string destination=Path.Combine(directory,$"BitChat-Setup-{update.Version}.exe");string partial=destination+".download";
         using var setupResponse=await http.GetAsync(update.SetupUrl,HttpCompletionOption.ResponseHeadersRead,cancellation);setupResponse.EnsureSuccessStatusCode();

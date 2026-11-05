@@ -37,6 +37,30 @@ public static class Diagnostics
             if(ReleaseUpdater.ParseTagVersion("v1.2.3-windows-preview")!=new Version(1,2,3,0)||ReleaseUpdater.ParseTagVersion("not-a-version")!=null)throw new InvalidDataException("Release tags were not parsed safely");
             return Task.FromResult<object>("semantic versions are compared independently of preview suffixes");
         });
+        await Check("Fresh profiles contain no conversations or shared identity",()=>
+        {
+            string temporary=Path.Combine(Path.GetDirectoryName(reportPath)!,"bitchat-profile-diagnostic-"+Guid.NewGuid().ToString("N"));string? prior=StateStore.OverrideRoot;
+            try
+            {
+                StateStore.OverrideRoot=Path.Combine(temporary,"existing");var existing=new StateStore();
+                existing.State.Messages.Add(new("mesh","synthetic-canary","test","synthetic profile isolation marker",0));existing.Save();
+                StateStore.OverrideRoot=Path.Combine(temporary,"fresh");var fresh=new StateStore();
+                if(fresh.State.Messages.Count!=0||fresh.State.KnownPeers.Count!=0||fresh.State.Outbox.Count!=0||fresh.State.NoiseContacts.Count!=0||fresh.State.Favorites.Count!=0)throw new IOException("Fresh profile contains existing conversation data");
+                if(fresh.State.NoiseKey.SequenceEqual(existing.State.NoiseKey)||fresh.State.SigningSeed.SequenceEqual(existing.State.SigningSeed)||fresh.State.NostrKey.SequenceEqual(existing.State.NostrKey))throw new CryptographicException("Fresh profiles share identity keys");
+                StateStore.OverrideRoot=Path.Combine(temporary,"existing");if(new StateStore().State.Messages.Count!=1)throw new IOException("Existing profile data was modified");
+                return Task.FromResult<object>("new profile is empty, keys are generated independently, existing history is preserved");
+            }
+            finally{StateStore.OverrideRoot=prior;if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
+        });
+        await Check("Update assets are restricted to this repository and release",()=>
+        {
+            const string tag="v0.1.9-windows-preview",asset="BitChat-Setup-unsigned.exe";
+            const string url="https://github.com/fd1437/bitchat_windows-macos/releases/download/v0.1.9-windows-preview/BitChat-Setup-unsigned.exe";
+            if(!ReleaseUpdater.IsReleaseAssetUrl(url,tag,asset))throw new InvalidDataException("Valid release rejected");
+            foreach(string invalid in new[]{url.Replace("fd1437/","other-owner/"),url.Replace("bitchat_windows-macos/","other-repo/"),url.Replace("https:","http:"),url.Replace("github.com/","github.com:444/"),url.Replace("github.com/","user@github.com/"),url.Replace(tag,"v0.1.8-windows-preview"),url+"?download=1",url+"#fragment",url+".other"})
+                if(ReleaseUpdater.IsReleaseAssetUrl(invalid,tag,asset))throw new InvalidDataException("Foreign or mismatched update URL accepted");
+            return Task.FromResult<object>("wrong owner, repository, tag, asset, scheme, credentials, port, query and fragment rejected");
+        });
         await Check("Configurable local file retention",async()=>
         {
             string temporary=Path.Combine(Path.GetDirectoryName(reportPath)!,"bitchat-retention-diagnostic-"+Guid.NewGuid().ToString("N"));string? prior=StateStore.OverrideRoot;StateStore.OverrideRoot=temporary;
@@ -57,7 +81,7 @@ public static class Diagnostics
             {
                 var store=new StateStore();byte[] payload=RandomNumberGenerator.GetBytes(1024*1024);var progress=new DownloadProgressLog();
                 using var updater=new ReleaseUpdater(store,new UpdateDownloadHandler(payload));
-                var update=new AvailableUpdate("v0.1.9-windows-preview","0.1.9","https://github.com/fd1437/bitchat_windows-macos/releases/download/v0.1.9/BitChat-Setup-unsigned.exe","https://github.com/fd1437/bitchat_windows-macos/releases/download/v0.1.9/BitChat-Setup-unsigned.exe.sha256.txt","https://github.com/fd1437/bitchat_windows-macos/releases",new Version(0,1,9,0));
+                var update=new AvailableUpdate("v0.1.9-windows-preview","0.1.9","https://github.com/fd1437/bitchat_windows-macos/releases/download/v0.1.9-windows-preview/BitChat-Setup-unsigned.exe","https://github.com/fd1437/bitchat_windows-macos/releases/download/v0.1.9-windows-preview/BitChat-Setup-unsigned.exe.sha256.txt","https://github.com/fd1437/bitchat_windows-macos/releases",new Version(0,1,9,0));
                 string file=await updater.DownloadVerifiedAsync(update,progress);
                 if(!File.ReadAllBytes(file).SequenceEqual(payload)||progress.Values.Count<2||!progress.Values[^1].Verified||progress.Values[^1].Total!=payload.Length)throw new IOException("Download progress or checksum verification failed");
                 File.Delete(file);if(File.Exists(file))throw new IOException("Downloaded installer is still held open");

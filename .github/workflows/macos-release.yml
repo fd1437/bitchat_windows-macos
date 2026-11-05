@@ -1,0 +1,41 @@
+name: macOS clean release
+on:
+  push:
+    branches: [codex/windows-native-port]
+    paths: ['scripts/package-macos.sh', 'scripts/audit_release.py', '.github/workflows/macos-release.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Exercise privacy boundary rejection cases
+        run: python3 -m unittest discover -s scripts/tests -p test_audit_release.py -v
+      - name: Compile and audit a fresh committed-source snapshot
+        env:
+          BITCHAT_MAC_BUILD_DIR: ${{ runner.temp }}/macos-build
+          BITCHAT_MAC_OUTPUT_DIR: ${{ runner.temp }}/macos-release
+        run: bash scripts/package-macos.sh > "$RUNNER_TEMP/macos-build.log" 2>&1
+      - name: Verify packaged ZIP and DMG
+        run: |
+          cd "$RUNNER_TEMP/macos-release"
+          shasum -a 256 -c SHA256-macOS.txt
+          hdiutil verify BitChat-macOS-universal-0.1.9.dmg
+          ditto -x -k BitChat-macOS-universal-0.1.9.zip "$RUNNER_TEMP/extracted"
+          codesign --verify --deep --strict "$RUNNER_TEMP/extracted/BitChat.app"
+          python3 "$GITHUB_WORKSPACE/scripts/audit_release.py" macos --root "$RUNNER_TEMP/extracted/BitChat.app" --compare SECURITY-macOS.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BitChat-macOS-universal
+          path: ${{ runner.temp }}/macos-release/*
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: macos-build-log
+          path: ${{ runner.temp }}/macos-build.log

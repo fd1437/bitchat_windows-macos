@@ -1,10 +1,10 @@
-# BitChat pour macOS — 0.1.8 preview
+# BitChat pour macOS — 0.1.9 preview
 
 Application native Swift/SwiftUI, universelle Intel et Apple Silicon, pour macOS 13 ou ultérieur. Le runtime et Tor sont embarqués : aucun SDK ni gestionnaire de paquets à installer.
 
 ## Installation
 
-1. Ouvrir `BitChat-macOS-universal-0.1.8.dmg`.
+1. Ouvrir `BitChat-macOS-universal-0.1.9.dmg`.
 2. Glisser `BitChat.app` vers `Applications`.
 3. Pour remplacer une version existante, quitter BitChat avec Cmd+Q avant de remplacer l’application. Les données utilisateur ne font pas partie du DMG.
 4. Ouvrir BitChat depuis Applications. Autoriser Bluetooth et les notifications pour utiliser ces fonctions; le microphone est nécessaire pour les vocaux.
@@ -29,3 +29,7 @@ bash scripts/package-macos.sh
 ```
 
 Les variables `BITCHAT_MAC_BUILD_DIR`, `BITCHAT_MAC_OUTPUT_DIR` et `BITCHAT_MAC_VERSION` permettent de choisir les chemins et la version. Le script compile les deux architectures, vérifie leur présence, scelle localement l’application, puis produit DMG, ZIP et empreintes SHA-256. `BUILD-INFO-macOS.txt` identifie le commit source et Xcode.
+
+Depuis 0.1.9, le script exige des modifications commitées, compile une archive Git propre dans un répertoire temporaire neuf et vérifie une liste explicite des ressources autorisées. Les attributs étendus du Mac de compilation ne sont pas copiés. Les releases officielles sont construites sur un runner GitHub neuf, sans le profil personnel du développeur. Les rapports `SECURITY-*.json` ne contiennent que des chemins relatifs, des nombres et des empreintes.
+
+Une réinstallation conserve les données déjà présentes dans le profil macOS. Retrouver ses conversations après une mise à jour ne signifie donc pas qu’elles étaient intégrées au DMG. La construction du paquet n’ouvre pas l’application et ne lit pas les dossiers de conversations ou le trousseau utilisateur.

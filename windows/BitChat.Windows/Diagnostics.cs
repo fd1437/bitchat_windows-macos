@@ -36,6 +36,7 @@ public static class Diagnostics
             }
             finally{StateStore.OverrideRoot=prior;if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
         });
+        await Check("Native Windows notification registration",()=>Task.FromResult<object>(NativeNotifications.ProbeRegistration()));
         await Check("Windows DPAPI",()=>{var clear=RandomNumberGenerator.GetBytes(32);var encrypted=ProtectedData.Protect(clear,null,DataProtectionScope.CurrentUser);if(!ProtectedData.Unprotect(encrypted,null,DataProtectionScope.CurrentUser).SequenceEqual(clear))throw new CryptographicException("DPAPI roundtrip failed");return Task.FromResult<object>("per-user encryption works");});
         await Check("Durable private media (DPAPI)",()=>
         {
@@ -120,9 +121,13 @@ public static class Diagnostics
             if(window.IsVisible)throw new InvalidOperationException("Closing must hide the window");
             window.RestoreFromTray();
             if(!window.IsVisible)throw new InvalidOperationException("Tray restore must reopen the same window");
-            window.VerifyComposerKeyHandling();window.VerifyImageReveal();
+            window.VerifyComposerKeyHandling();window.VerifyImageReveal();window.VerifyDraftStaging();
+            string nativeXml=NativeNotifications.BuildContent("mesh","Alice","Photo",new Uri("file:///C:/preview.png"),false).GetToastContent().GetContent();
+            if(!nativeXml.Contains("<input")||!nativeXml.Contains("<image")||!nativeXml.Contains("reply"))throw new InvalidDataException("Native notification is missing its image or reply input");
+            window.PrepareVisualDiagnostics();
             var content=(FrameworkElement)window.Content;content.Measure(new Size(1120,780));content.Arrange(new Rect(0,0,1120,780));content.UpdateLayout();
-            var render=new RenderTargetBitmap(1120,780,96,96,PixelFormats.Pbgra32);render.Render(content);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(render));using var stream=File.Create(path);encoder.Save(stream);
+            var render=new RenderTargetBitmap(1120,780,96,96,PixelFormats.Pbgra32);render.Render(content);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(render));using(var stream=File.Create(path))encoder.Save(stream);
+            window.SetDiagnosticHackMode();content.UpdateLayout();var hackRender=new RenderTargetBitmap(1120,780,96,96,PixelFormats.Pbgra32);hackRender.Render(content);var hackEncoder=new PngBitmapEncoder();hackEncoder.Frames.Add(BitmapFrame.Create(hackRender));using(var hackFile=File.Create(Path.ChangeExtension(path,"hack.png")))hackEncoder.Save(hackFile);
         }
         finally{if(window!=null){await window.ShutdownDiagnostics();window.Close();}StateStore.OverrideRoot=null;if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
     }

@@ -151,10 +151,20 @@ public sealed partial class AppController:IAsyncDisposable
     {
         if(conversation!="mesh"&&!conversation.StartsWith("mesh:"))throw new InvalidOperationException("Attachments are sent over Bluetooth mesh.");
         if(Bluetooth.Connections==0)throw new IOException("No Bluetooth link is available");
+        await SendAttachment(conversation,await LoadAttachment(path));
+    }
+    public static async Task<MediaPacket> LoadAttachment(string path)
+    {
         var file=new FileInfo(path);if(file.Length>MediaPacket.MaxBytes)throw new ArgumentException("Attachments are limited to 1 MiB.");
         string mime=file.Extension.ToLowerInvariant() switch{".jpg" or ".jpeg"=>"image/jpeg",".png"=>"image/png",".webp"=>"image/webp",".wav"=>"audio/wav",".m4a"=>"audio/mp4",_=>"application/octet-stream"};
         string name=mime=="image/jpeg"?"img_"+Guid.NewGuid().ToString().ToUpperInvariant()+".jpg":mime=="audio/mp4"?"voice_"+Guid.NewGuid().ToString().ToUpperInvariant()+".m4a":file.Name;
-        await SendAttachment(conversation,new(name,mime,await File.ReadAllBytesAsync(path)));
+        return new(name,mime,await File.ReadAllBytesAsync(path));
+    }
+    public Task SendPreparedMedia(string conversation,MediaPacket media)
+    {
+        if(conversation!="mesh"&&!conversation.StartsWith("mesh:"))throw new InvalidOperationException("Files are available in Bluetooth conversations");
+        if(Bluetooth.Connections==0)throw new IOException("No Bluetooth link is available; your attachment remains in the draft");
+        return SendAttachment(conversation,media);
     }
     private async Task Observe(Func<Task> action){try{await action();}catch(Exception e){Status?.Invoke(e.Message);}}
     private byte[] ReplyKey(string peer)

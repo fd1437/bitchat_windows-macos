@@ -26,6 +26,9 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
     private readonly Dictionary<string,List<byte[]>> pending=[];
     private readonly Dictionary<string,MeshPeer> peers=[];
     private readonly Dictionary<string,long> seen=[];
+    private sealed record DeferredPacket(byte[] Bytes,string? Ingress,Guid? Epoch,long Received,Guid? Generation=null);
+    private readonly Dictionary<string,List<DeferredPacket>> awaitingIdentity=[];
+    private readonly Dictionary<string,List<DeferredPacket>> earlyCiphertexts=[];
     private readonly FragmentAssembler fragments=new();
     private readonly Dictionary<string,MeshPacket> archive=[];
     private readonly Dictionary<string,long> lastSyncResponse=[];
@@ -77,7 +80,7 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
     private async Task SendTypedLocked(string peer,byte[] payload)
     {
         if(IsBlocked(peer))throw new InvalidOperationException("Peer is blocked");
-        if(sessions.TryGetValue(peer,out var session)&&(session.Send??session.Previous?.Send) is NoiseCipher activeSend){await send(Packet(0x11,activeSend.Encrypt(payload),peer,payload.Length>60000?(byte)2:(byte)1,false));return;}
+        if(sessions.TryGetValue(peer,out var session)&&session.Send is NoiseCipher activeSend){await send(Packet(0x11,activeSend.Encrypt(payload),peer,payload.Length>60000?(byte)2:(byte)1,false));return;}
         if(!pending.TryGetValue(peer,out var list))pending[peer]=list=[];
         if(list.Count>=64)throw new IOException("Private send queue is full");list.Add(payload);
         if(session==null||Bytes.Now-session.Started>30000)
@@ -121,13 +124,56 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
     private static string Dedup(MeshPacket p)=>Bytes.Hex(Crypto.Hash(Bytes.Join(p.Sender,[p.Type],Bytes.U64(p.Timestamp),p.Payload)));
     public async Task Receive(byte[] bytes,string? ingress=null,Guid? ingressEpoch=null)
     {
-        if(stopping)return;await gate.WaitAsync();
+        if(stopping)return;List<DeferredPacket>? ready=null;await gate.WaitAsync();
         try
         {
             if(stopping)return;var p=MeshPacket.Decode(bytes);bool directIngress=true;if(p.Type==0x20){var result=fragments.Add(p,ingress,ingressEpoch,out directIngress);if(result==null)return;p=result;}
             string peerId=Bytes.Hex(p.Sender);if(peerId==Id||IsBlocked(peerId)||p.Ttl>7)return;
             if(p.Timestamp>(ulong)(Bytes.Now+300000))return;
             if(p.IsRsr&&Bytes.Now-lastSyncRequest>60000)return;
+            peers.TryGetValue(peerId,out var prevalidatedPeer);
+            if(p.Type is 2 or 0x22&&prevalidatedPeer==null&&p.Signature!=null)
+            {
+                foreach(var key in awaitingIdentity.Keys.ToArray())
+                {awaitingIdentity[key].RemoveAll(item=>Bytes.Now-item.Received>15000);if(awaitingIdentity[key].Count==0)awaitingIdentity.Remove(key);}
+                if(p.Payload.Length<=65536&&(awaitingIdentity.ContainsKey(peerId)||awaitingIdentity.Count<16))
+                {
+                    if(!awaitingIdentity.TryGetValue(peerId,out var queue))awaitingIdentity[peerId]=queue=[];
+                    if(queue.Count<8&&awaitingIdentity.Values.Sum(q=>q.Sum(item=>item.Bytes.Length))+bytes.Length<=256*1024&&!queue.Any(item=>item.Bytes.SequenceEqual(bytes)))
+                        queue.Add(new(bytes.ToArray(),ingress,ingressEpoch,Bytes.Now));
+                }
+                return;
+            }
+            if(p.Type==0x11&&p.Recipient?.SequenceEqual(PeerId)==true)
+            {
+                if(!sessions.TryGetValue(peerId,out var incomingSession))
+                {
+                    // A peer may retain its old transport while this PC has restarted.
+                    // Request a fresh authenticated session instead of silently dropping forever.
+                    if(prevalidatedPeer!=null&&sessions.Count<128)
+                    {sessions[peerId]=new(true,noiseKey);await send(Packet(0x10,sessions[peerId].Handshake.Write(),peerId,signed:false));}
+                    return;
+                }
+                if(incomingSession.Receive==null)
+                {
+                    foreach(string key in earlyCiphertexts.Keys.ToArray())
+                    {earlyCiphertexts[key].RemoveAll(item=>Bytes.Now-item.Received>15000);if(earlyCiphertexts[key].Count==0)earlyCiphertexts.Remove(key);}
+                    if(p.Payload.Length<=16384&&(earlyCiphertexts.ContainsKey(peerId)||earlyCiphertexts.Count<32))
+                    {
+                        if(!earlyCiphertexts.TryGetValue(peerId,out var queue))earlyCiphertexts[peerId]=queue=[];
+                        queue.RemoveAll(item=>item.Generation!=incomingSession.Generation);
+                        if(queue.Count<8&&earlyCiphertexts.Values.Sum(q=>q.Sum(item=>item.Bytes.Length))+bytes.Length<=256*1024&&!queue.Any(item=>item.Bytes.SequenceEqual(bytes)))queue.Add(new(bytes.ToArray(),ingress,ingressEpoch,Bytes.Now,incomingSession.Generation));
+                    }
+                    return;
+                }
+            }
+            // Never let an invalid signature poison dedup for the real packet.
+            if(p.Type==1)
+            {
+                var candidate=Announcement.Decode(p.Payload);
+                if(!Crypto.Hash(candidate.NoiseKey)[..8].SequenceEqual(p.Sender)||p.Signature==null||!Crypto.VerifyEd(candidate.SigningKey,p.SigningBytes(),p.Signature))return;
+            }
+            else if(p.Signature!=null&&prevalidatedPeer!=null&&!Crypto.VerifyEd(prevalidatedPeer.SigningKey,p.SigningBytes(),p.Signature))return;
             var dedup=Dedup(p);if(seen.ContainsKey(dedup))return;
             foreach(var old in seen.Where(x=>Bytes.Now-x.Value>300000).Select(x=>x.Key).ToArray())seen.Remove(old);
             if(seen.Count>=10000)seen.Remove(seen.Keys.First());seen[dedup]=Bytes.Now;
@@ -141,6 +187,7 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
                 if(peer!=null&&(!peer.NoiseKey.SequenceEqual(ann.NoiseKey)||!peer.SigningKey.SequenceEqual(ann.SigningKey)))return;
                 if(peers.Count>=512&&!peers.ContainsKey(peerId)){var oldest=peers.Values.Where(x=>!pinnedKeys.ContainsKey(x.Id)).OrderBy(x=>x.LastSeen).FirstOrDefault();if(oldest==null)return;peers.Remove(oldest.Id);}
                 peers[peerId]=peer=new(peerId,ann.Nickname,ann.NoiseKey,ann.SigningKey,ann.Capabilities??[0],Bytes.Now,peer?.Authenticated??false,ann.BatteryPercent);topology[peerId]=(ann.Neighbors??[]).Select(Bytes.Hex).ToArray();if(ingress!=null&&p.Ttl==7&&!p.IsRsr)IngressPeerValidated?.Invoke(ingress,peerId);PeerChanged?.Invoke(peer);
+                if(awaitingIdentity.Remove(peerId,out var waiting))ready=waiting.Where(item=>Bytes.Now-item.Received<=15000).ToList();
             }
             else if(addressed)
             {
@@ -168,7 +215,11 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
                     case 0x29:if(peer!=null&&p.Signature!=null&&p.Timestamp>=(ulong)(Bytes.Now-30000)&&Crypto.VerifyEd(peer.SigningKey,p.SigningBytes(),p.Signature))TypedPayload?.Invoke(peerId,p.Type,p.Payload);break;
                     case 0x2A:if(peer!=null&&p.Signature!=null&&p.Timestamp>=(ulong)(Bytes.Now-300000)&&Crypto.VerifyEd(peer.SigningKey,p.SigningBytes(),p.Signature))TypedPayload?.Invoke(peerId,p.Type,p.Payload);break;
                     case 0x21:if(peer!=null)await RespondSync(peerId,p.Payload);break;
-                    case 0x10:await Handshake(peerId,p.Payload,p.Ttl==7&&directIngress?ingress:null,p.Ttl==7&&directIngress?ingressEpoch:null);break;
+                    case 0x10:
+                        await Handshake(peerId,p.Payload,p.Ttl==7&&directIngress?ingress:null,p.Ttl==7&&directIngress?ingressEpoch:null);
+                        if(sessions.TryGetValue(peerId,out var established)&&established.Receive!=null&&earlyCiphertexts.Remove(peerId,out var early))
+                        {ready??=[];ready.AddRange(early.Where(item=>item.Generation==established.Generation&&Bytes.Now-item.Received<=15000));}
+                        break;
                     case 0x11:
                         if(!sessions.TryGetValue(peerId,out var session)||(session.Receive??session.Previous?.Receive) is not NoiseCipher activeReceive)return;
                         byte[] plain;try{plain=activeReceive.Decrypt(p.Payload);}catch(CryptographicException){if(session.Send!=null&&Bytes.Now-session.Started>30000){var candidate=new Session(true,noiseKey){Previous=session};sessions[peerId]=candidate;await send(Packet(0x10,candidate.Handshake.Write(),peerId,signed:false));}throw;}if(plain.Length<1)return;await HandleTyped(peerId,plain[0],plain[1..],p.Timestamp,session.Receive!=null?session:session.Previous!);break;
@@ -191,6 +242,7 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
         }
         catch(Exception e)when(e is InvalidDataException or CryptographicException or ArgumentException or OverflowException or InvalidOperationException){Status?.Invoke("Rejected mesh packet: "+e.Message);}
         finally{gate.Release();}
+        if(ready!=null)foreach(var item in ready)await Receive(item.Bytes,item.Ingress,item.Epoch);
     }
     private async Task Handshake(string peerId,byte[] bytes,string? ingress,Guid? ingressEpoch)
     {

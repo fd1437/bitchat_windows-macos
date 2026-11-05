@@ -16,10 +16,11 @@ public sealed partial class AppController
     private readonly Dictionary<string,InboundBurst> voiceBursts=[];
     private readonly HashSet<VoicePlayback> voicePlaybacks=[];
     public bool IsRecording=>recorder!=null;
+    public event Action<string,MediaPacket>? VoiceNoteReady;
     public async Task BeginVoice(string conversation,bool live)
     {
         live=live&&Store.State.LiveVoice;
-        if(Bluetooth.Connections==0)throw new IOException("No Bluetooth link is available for voice");
+        if(live&&Bluetooth.Connections==0)throw new IOException("No Bluetooth link is available for live voice");
         if(recorder!=null)throw new InvalidOperationException("A recording is already active");if(conversation!="mesh"&&!conversation.StartsWith("mesh:"))throw new InvalidOperationException("Voice recording is available in Bluetooth mesh chats");
         recordingConversation=conversation;voiceStarted=Bytes.Now;voiceSequence=1;recorder=new();
         try
@@ -31,7 +32,7 @@ public sealed partial class AppController
                 await voicePackets.Writer.WriteAsync(new(recordingBurst,0,1,[1]));
                 recorder.Frame+=frame=>{if(!channel.Writer.TryWrite(new(recordingBurst,voiceSequence++,0,Bytes.Join(Bytes.U16((ushort)frame.Length),frame))))Status?.Invoke("Voice network queue is full");};
             }
-            recorder.Error+=error=>Post(()=>{Status?.Invoke(error);_=EndVoice(false);});recorder.Start();Status?.Invoke(live?"Live voice · release to stop":"Recording voice note · click stop to send");
+            recorder.Error+=error=>Post(()=>{Status?.Invoke(error);_=EndVoice(false);});recorder.Start();Status?.Invoke(live?"Live voice · release to stop":"Recording voice note · click stop to add to your draft");
         }
         catch{await recorder.DisposeAsync();recorder=null;voicePackets?.Writer.TryComplete();recordingBurst=null;throw;}
     }
@@ -49,9 +50,9 @@ public sealed partial class AppController
             }
             else if(!cancel)
             {
-                await SendAttachment(conversation,note);
+                Post(()=>VoiceNoteReady?.Invoke(conversation,note));
             }
-            Status?.Invoke(cancel?"Voice recording canceled":"Voice recording sent");
+            Status?.Invoke(cancel?"Voice recording canceled":recordingBurst!=null?"Live voice sent":"Voice note added to draft · press Send");
         }
         catch(Exception e){Status?.Invoke("Voice recording: "+e.Message);}
         finally{await capture.DisposeAsync();voicePackets?.Writer.TryComplete();voicePackets=null;voiceSender=null;recordingBurst=null;recordingConversation=null;}

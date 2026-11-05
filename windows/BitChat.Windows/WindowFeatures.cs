@@ -44,7 +44,7 @@ public sealed partial class MainWindow
         var files=store.State.Messages.Where(m=>m.Conversation==conversation&&(m.Mime!=null||m.LocalAttachmentDeleted))
             .OrderByDescending(m=>m.Timestamp).Select(m=>new FileGalleryRow(m,$"{DateTimeOffset.FromUnixTimeMilliseconds(m.Timestamp).ToLocalTime():g}   {m.Text}   ·   {m.Sender}{(m.LocalAttachmentDeleted?"   (deleted locally)":"")}")).ToArray();
         if(files.Length==0)return;
-        var dialog=new Window{Owner=this,Title="Conversation files",Width=760,Height=570,MinWidth=520,MinHeight=360,Background=bg,Foreground=Foreground,WindowStartupLocation=WindowStartupLocation.CenterOwner};
+        var dialog=new Window{Owner=this,FontFamily=FontFamily,Title="Conversation files",Width=760,Height=570,MinWidth=520,MinHeight=360,Background=bg,Foreground=Foreground,WindowStartupLocation=WindowStartupLocation.CenterOwner};
         var root=new Grid{Margin=new Thickness(18)};root.RowDefinitions.Add(new(){Height=new GridLength(1,GridUnitType.Star)});root.RowDefinitions.Add(new(){Height=GridLength.Auto});root.RowDefinitions.Add(new(){Height=GridLength.Auto});dialog.Content=root;
         var buttons=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};
         var delete=new Button{Content="Delete selected local files",Background=panel,Foreground=green,Padding=new Thickness(12,8,12,8),Margin=new Thickness(4)};
@@ -52,8 +52,8 @@ public sealed partial class MainWindow
         var close=new Button{Content="Close",Background=panel,Foreground=green,Padding=new Thickness(12,8,12,8),Margin=new Thickness(4)};
         buttons.Children.Add(delete);buttons.Children.Add(save);buttons.Children.Add(close);Grid.SetRow(buttons,2);root.Children.Add(buttons);
         var list=new ListBox{SelectionMode=SelectionMode.Extended,Background=bg,Foreground=Foreground,BorderBrush=muted,Margin=new Thickness(0,12,0,8),DisplayMemberPath="Label"};
-        foreach(var row in files)list.Items.Add(row);Grid.SetRow(list,0);root.Children.Add(list);
-        var description=new TextBlock{Text="Select rows with Ctrl-click or Shift-click. Deletion removes the saved local copies from this device.",Foreground=muted,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,4,0,6)};Grid.SetRow(description,1);root.Children.Add(description);
+        foreach(var row in files)list.Items.Add(row);list.MouseDoubleClick+=(_,_)=>{if(list.SelectedItem is FileGalleryRow selected&&selected.Message.Attachment!=null)OpenMediaViewer(selected.Message);};Grid.SetRow(list,0);root.Children.Add(list);
+        var description=new TextBlock{Text="Double-click to open the viewer. Select rows with Ctrl-click or Shift-click. Deletion removes the saved local copies from this device.",Foreground=muted,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,4,0,6)};Grid.SetRow(description,1);root.Children.Add(description);
         delete.Click+=async(_,_)=>{var selected=list.SelectedItems.Cast<FileGalleryRow>().Select(row=>row.Message).ToArray();if(selected.Length==0)return;try{int count=await controller.DeleteLocalAttachments(selected);status.Text=$"Deleted {count} local file(s)";dialog.Close();Select(conversation);}catch(Exception e){status.Text=e.Message;}};
         save.Click+=(_,_)=>{if(list.SelectedItems.Count==0||list.SelectedItems[0] is not FileGalleryRow row)return;if(row.Message.Attachment!=null)ExportAttachment(row.Message);};close.Click+=(_,_)=>dialog.Close();
         dialog.ShowDialog();

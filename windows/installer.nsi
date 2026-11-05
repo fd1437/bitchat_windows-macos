@@ -11,7 +11,7 @@ Unicode True
   !define OUTPUT "BitChat-Setup-unsigned.exe"
 !endif
 !ifndef VERSION
-  !define VERSION "0.1.7"
+  !define VERSION "0.1.8"
 !endif
 Var ExistingInstall
 Var ExistingAction
@@ -81,6 +81,8 @@ Function ExistingInstallLeave
   ${If} $0 == ${BST_CHECKED}
     StrCpy $ExistingAction "latest"
     StrCpy $InstallLatest "1"
+    ExecShell "open" "$INSTDIR\BitChat.exe" "--install-latest"
+    Quit
   ${Else}
     ${NSD_GetState} $ActionUninstall $0
     ${If} $0 == ${BST_CHECKED}
@@ -106,10 +108,12 @@ FunctionEnd
 Section "BitChat" SecMain
   SetOutPath "$INSTDIR"
   ${If} ${IsNativeARM64}
+    DetailPrint "Installing the native ARM64 application"
     File /oname=BitChat.exe "${PAYLOAD}\win-arm64\BitChat.exe"
     SetOutPath "$INSTDIR\native\win-arm64"
     File "${PAYLOAD}\win-arm64\native\win-arm64\bitchat_zlib.dll"
   ${Else}
+    DetailPrint "Installing the native x64 application"
     File /oname=BitChat.exe "${PAYLOAD}\win-x64\BitChat.exe"
     SetOutPath "$INSTDIR\native\win-x64"
     File "${PAYLOAD}\win-x64\native\win-x64\bitchat_zlib.dll"
@@ -139,6 +143,9 @@ Section "BitChat" SecMain
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\BitChat" "NoRepair" 1
 SectionEnd
 Section "Uninstall"
+  ExecWait '"$INSTDIR\BitChat.exe" --unregister-notifications'
+  RMDir /r "$LOCALAPPDATA\BitChat\notification-previews"
+  RMDir /r "$LOCALAPPDATA\BitChat\clipboard"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "BitChat"
   RMDir /r "$LOCALAPPDATA\BitChat\updates"
   RMDir /r "$INSTDIR\native"

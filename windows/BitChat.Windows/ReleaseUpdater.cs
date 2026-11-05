@@ -9,6 +9,8 @@ using System.Text.Json;
 
 namespace BitChat.Windows;
 
+internal sealed record DownloadProgress(long Bytes,long? Total,bool Verified=false);
+
 internal sealed record AvailableUpdate(string Tag,string VersionText,string SetupUrl,string ChecksumUrl,string ReleaseUrl,Version Version);
 
 internal sealed class ReleaseUpdater(StateStore store):IDisposable
@@ -77,11 +79,11 @@ internal sealed class ReleaseUpdater(StateStore store):IDisposable
 
     private static bool IsGithubUrl(string value)=>Uri.TryCreate(value,UriKind.Absolute,out var uri)&&uri.Scheme==Uri.UriSchemeHttps&&uri.Host.Equals("github.com",StringComparison.OrdinalIgnoreCase);
     private static bool IsReleaseDownloadHost(Uri uri)=>uri.Scheme==Uri.UriSchemeHttps&&(uri.Host.Equals("github.com",StringComparison.OrdinalIgnoreCase)||uri.Host.EndsWith(".githubusercontent.com",StringComparison.OrdinalIgnoreCase));
-    private static async Task CopyLimitedAsync(Stream source,Stream target,long limit,CancellationToken cancellation)
+    private static async Task CopyLimitedAsync(Stream source,Stream target,long limit,CancellationToken cancellation,Action<long>? progress=null)
     {
         byte[] buffer=new byte[128*1024];long total=0;int read;
         while((read=await source.ReadAsync(buffer,cancellation))>0)
-        {total+=read;if(total>limit)throw new InvalidDataException("The GitHub download exceeds its size limit");await target.WriteAsync(buffer.AsMemory(0,read),cancellation);}
+        {total+=read;if(total>limit)throw new InvalidDataException("The GitHub download exceeds its size limit");await target.WriteAsync(buffer.AsMemory(0,read),cancellation);progress?.Invoke(total);}
     }
     private AvailableUpdate? CachedUpdate()
     {
@@ -91,7 +93,7 @@ internal sealed class ReleaseUpdater(StateStore store):IDisposable
         return new(store.State.UpdateTag!,version.ToString(3),store.State.UpdateSetupUrl,store.State.UpdateChecksumUrl,store.State.UpdateReleaseUrl??"https://github.com/fd1437/bitchat_windows-macos/releases",version);
     }
 
-    public async Task<string> DownloadVerifiedAsync(AvailableUpdate update,CancellationToken cancellation=default)
+    public async Task<string> DownloadVerifiedAsync(AvailableUpdate update,IProgress<DownloadProgress>? progress=null,CancellationToken cancellation=default)
     {
         if(!IsGithubUrl(update.SetupUrl)||!IsGithubUrl(update.ChecksumUrl))throw new InvalidDataException("The release download URL is not a trusted GitHub HTTPS URL");
         string directory=Path.Combine(StateStore.Root,"updates");Directory.CreateDirectory(directory);
@@ -104,7 +106,7 @@ internal sealed class ReleaseUpdater(StateStore store):IDisposable
         {
             await using(var source=await setupResponse.Content.ReadAsStreamAsync(cancellation))
             await using(var target=new FileStream(partial,FileMode.Create,FileAccess.Write,FileShare.None,128*1024,true))
-            {await CopyLimitedAsync(source,target,800_000_000,cancellation);if(target.Length<1_000_000)throw new InvalidDataException("The downloaded installer size is invalid");}
+            {await CopyLimitedAsync(source,target,800_000_000,cancellation,bytes=>progress?.Report(new(bytes,length)));if(target.Length<1_000_000)throw new InvalidDataException("The downloaded installer size is invalid");}
             using var checksumResponse=await http.GetAsync(update.ChecksumUrl,HttpCompletionOption.ResponseHeadersRead,cancellation);checksumResponse.EnsureSuccessStatusCode();
             Uri? checksumFinal=checksumResponse.RequestMessage?.RequestUri;
             if(checksumFinal==null||!IsReleaseDownloadHost(checksumFinal))throw new InvalidDataException("Unexpected checksum download redirect");
@@ -114,7 +116,7 @@ internal sealed class ReleaseUpdater(StateStore store):IDisposable
             if(!match.Success)throw new InvalidDataException("The release checksum file is missing a SHA-256 digest");
             byte[] expected=Convert.FromHexString(match.Groups[1].Value);await using var file=File.OpenRead(partial);byte[] actual=await SHA256.HashDataAsync(file,cancellation);
             if(!CryptographicOperations.FixedTimeEquals(expected,actual))throw new CryptographicException("The installer SHA-256 does not match the GitHub checksum");
-            File.Move(partial,destination,true);return destination;
+            File.Move(partial,destination,true);progress?.Report(new(new FileInfo(destination).Length,length,true));return destination;
         }
         catch{try{File.Delete(partial);}catch{}throw;}
     }

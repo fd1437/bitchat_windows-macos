@@ -47,9 +47,7 @@ public sealed partial class MainWindow
         hide.Click+=(_,_)=>{revealedImages.Remove(ImageKey(message));preview.Source=null;preview.Visibility=Visibility.Collapsed;hide.Visibility=Visibility.Collapsed;placeholder.Visibility=Visibility.Visible;placeholder.Content="Tap to reveal · image";};
         preview.MouseLeftButtonUp+=(_,_)=>
         {
-            var viewer=new Window{Owner=this,Title=message.Text,Width=900,Height=700,Background=Brushes.Black,WindowStartupLocation=WindowStartupLocation.CenterOwner,
-                Content=new Image{Source=preview.Source,Stretch=Stretch.Uniform,Margin=new Thickness(12)}};
-            viewer.ShowDialog();
+            OpenMediaViewer(message);
         };
         if(message.Own||revealedImages.Contains(ImageKey(message)))Reveal();
         return panel;

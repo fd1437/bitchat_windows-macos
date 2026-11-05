@@ -195,3 +195,54 @@ foreach(byte[] legacyContent in new byte[][]{[],[42],[42,43]})
     Check(MediaPacket.Decode(encodedLegacy).Content.SequenceEqual(legacyContent),"Legacy image/file content length edge: "+legacyContent.Length);
 }
 Console.WriteLine($"TOTAL {passed} checks passed");
+
+// Messages can race the sender's identity announcement on independent BLE links.
+var recoveryPackets=new List<MeshPacket>();
+using var recoverySender=new MeshEngine(RandomNumberGenerator.GetBytes(32),RandomNumberGenerator.GetBytes(32),"Mac peer",packet=>{recoveryPackets.Add(packet);return Task.FromResult(1);});
+using var recoveryReceiver=new MeshEngine(RandomNumberGenerator.GetBytes(32),RandomNumberGenerator.GetBytes(32),"Windows peer",_=>Task.FromResult(0));
+var recoveredMessages=new List<ChatMessage>();recoveryReceiver.Message+=recoveredMessages.Add;
+await recoverySender.SendPublic("arrived before announcement");var early=recoveryPackets[^1];
+await recoveryReceiver.Receive(early.Encode());await recoveryReceiver.Receive(early.Encode());
+Check(recoveredMessages.Count==0,"Messages from an unknown identity are not exposed before authentication");
+await recoverySender.Announce();var identityPacket=recoveryPackets[^1];
+await recoveryReceiver.Receive((identityPacket with{Signature=new byte[64]}).Encode());
+await recoveryReceiver.Receive(identityPacket.Encode());
+Check(recoveredMessages.Count==1&&recoveredMessages[0].Content=="arrived before announcement","Late authenticated announcement recovers an early Mac message exactly once");
+await recoverySender.SendPublic("valid packet after forged copy");var later=recoveryPackets[^1];
+await recoveryReceiver.Receive((later with{Signature=new byte[64]}).Encode());await recoveryReceiver.Receive(later.Encode());
+Check(recoveredMessages.Count==2,"An invalid signature cannot suppress the matching authentic message via dedup");
+await recoveryReceiver.Receive(early.Encode());
+Check(recoveredMessages.Count==2,"Recovered messages remain deduplicated on subsequent BLE retries");
+Console.WriteLine($"TOTAL {passed} checks passed");
+
+// Reproduce the private-message race: ciphertext beats handshake message 3.
+var privateTransit=new List<(bool ToReceiver,MeshPacket Packet)>();
+Task<int> PrivateLink(bool toReceiver,MeshPacket packet){privateTransit.Add((toReceiver,packet));return Task.FromResult(1);}
+var macNoise=RandomNumberGenerator.GetBytes(32);var macSigning=RandomNumberGenerator.GetBytes(32);
+var pcNoise=RandomNumberGenerator.GetBytes(32);var pcSigning=RandomNumberGenerator.GetBytes(32);
+using var macSession=new MeshEngine(macNoise,macSigning,"mac",packet=>PrivateLink(true,packet));
+using var pcSession=new MeshEngine(pcNoise,pcSigning,"pc",packet=>PrivateLink(false,packet));
+var privateReceived=new List<ChatMessage>();pcSession.Message+=privateReceived.Add;
+await macSession.Announce();await pcSession.Announce();
+foreach(var item in privateTransit.ToArray())await(item.ToReceiver?pcSession:macSession).Receive(item.Packet.Encode());privateTransit.Clear();
+await macSession.SendPrivate(pcSession.Id,"private ciphertext before final handshake","early-private-1");
+var firstPrivate=privateTransit[0];privateTransit.Clear();await pcSession.Receive(firstPrivate.Packet.Encode());
+var secondPrivate=privateTransit[0];privateTransit.Clear();await macSession.Receive(secondPrivate.Packet.Encode());
+var finalHandshake=privateTransit.Single(item=>item.Packet.Type==0x10);
+foreach(var item in privateTransit.Where(item=>item.Packet.Type==0x11).ToArray())await pcSession.Receive(item.Packet.Encode());privateTransit.Clear();
+Check(privateReceived.Count==0,"Early private ciphertext stays private until the exact session authenticates");
+await pcSession.Receive(finalHandshake.Packet.Encode());
+Check(privateReceived.Count==1&&privateReceived[0].Content=="private ciphertext before final handshake","Out-of-order Mac private message is delivered after handshake authentication");
+privateTransit.Clear();
+using var restartedPc=new MeshEngine(pcNoise,pcSigning,"restarted pc",packet=>PrivateLink(false,packet));
+restartedPc.RestorePeer(new(macSession.Id,"mac",Crypto.PublicX(macNoise),Crypto.PublicEd(macSigning),[0],Bytes.Now));
+await macSession.SendPrivate(pcSession.Id,"message after PC restart","restart-private-1");
+var staleCipher=privateTransit.First(item=>item.ToReceiver&&item.Packet.Type==0x11);privateTransit.Clear();await restartedPc.Receive(staleCipher.Packet.Encode());
+Check(privateTransit.Any(item=>!item.ToReceiver&&item.Packet.Type==0x10),"PC restart actively renegotiates a stale Mac private session");
+Console.WriteLine($"TOTAL {passed} checks passed");
+var restartedReceived=new List<ChatMessage>();restartedPc.Message+=restartedReceived.Add;
+int restartBudget=100;while(privateTransit.Count>0){if(--restartBudget==0)throw new Exception("Restart negotiation loop");var item=privateTransit[0];privateTransit.RemoveAt(0);await(item.ToReceiver?restartedPc:macSession).Receive(item.Packet.Encode());}
+await macSession.SendPrivate(restartedPc.Id,"message after PC restart","restart-private-1");
+while(privateTransit.Count>0){if(--restartBudget==0)throw new Exception("Restart message loop");var item=privateTransit[0];privateTransit.RemoveAt(0);await(item.ToReceiver?restartedPc:macSession).Receive(item.Packet.Encode());}
+Check(restartedReceived.Count==1&&restartedReceived[0].Id=="restart-private-1","Renegotiated Mac session can deliver the previously unacknowledged private message");
+Console.WriteLine($"TOTAL {passed} checks passed");

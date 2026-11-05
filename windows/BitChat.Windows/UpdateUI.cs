@@ -34,14 +34,23 @@ public sealed partial class MainWindow
         try
         {
             status.Text="Downloading and verifying BitChat "+availableUpdate.VersionText+"…";
-            string installer=await updater.DownloadVerifiedAsync(availableUpdate);
+            if(updateProgress!=null){updateProgress.Visibility=Visibility.Visible;updateProgress.IsIndeterminate=true;}
+            var progress=new Progress<DownloadProgress>(value=>
+            {
+                double percent=value.Verified?100:value.Total is >0?Math.Min(99,100d*value.Bytes/value.Total.Value):0;
+                string label=value.Verified?"Verified · 100%":value.Total is >0?$"Downloading · {percent:0}%":$"Downloading · {value.Bytes/1048576d:0.0} MB";
+                if(updateButton!=null)updateButton.Content=label;
+                if(updateProgress!=null){updateProgress.IsIndeterminate=value.Total is null or <=0;updateProgress.Value=percent;}
+                status.Text=label;
+            });
+            string installer=await updater.DownloadVerifiedAsync(availableUpdate,progress);
             status.Text="Verified installer. BitChat will close, update, and restart.";
             if(!updater.StartInstallerAfterExit(installer))throw new IOException("Could not start the update helper");
             updateCheckTimer.Stop();await Quit();
         }
         catch(Exception e)
         {
-            status.Text="Update could not be installed: "+e.Message;updating=false;
+            status.Text="Update could not be installed: "+e.Message;updating=false;if(updateProgress!=null)updateProgress.Visibility=Visibility.Collapsed;
             if(updateButton!=null){updateButton.IsEnabled=true;updateButton.Content="● Update available · "+availableUpdate.VersionText;}
         }
     }

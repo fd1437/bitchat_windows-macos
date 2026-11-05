@@ -27,6 +27,7 @@ public sealed class BluetoothTransport:IDisposable
     public (string Peer,Guid Epoch)[] DirectRoutes=>directPeers.Select(p=>(Peer:p.Value,Epoch:authenticatedLinks.Epoch(p.Key))).Where(p=>p.Epoch!=null).Select(p=>(p.Peer,p.Epoch!.Value)).ToArray();
     public void RememberAuthenticated(string peer,string ingress,Guid epoch,Guid generation)=>authenticatedLinks.Authenticate(ingress,epoch,peer,generation);
     private readonly ConcurrentDictionary<string,SemaphoreSlim> clientSendGates=new();
+    private readonly ConcurrentDictionary<string,SemaphoreSlim> writeReceiveGates=new();
     public byte[][] DirectPeers=>directPeers.Values.Distinct().Select(Convert.FromHexString).ToArray();
     public void RememberDirectPeer(string ingress,string peer)=>directPeers[ingress]=peer;
     private BluetoothLEAdvertisementWatcher? watcher;
@@ -100,6 +101,7 @@ public sealed class BluetoothTransport:IDisposable
     private async void OnWrite(GattLocalCharacteristic sender,GattWriteRequestedEventArgs args)
     {
         string key=args.Session.DeviceId.Id;Guid epoch=authenticatedLinks.EnsureOpen(key);using var deferral=args.GetDeferral();
+        var receiveGate=writeReceiveGates.GetOrAdd(key,_=>new(1));await receiveGate.WaitAsync();
         try
         {
             var request=await args.GetRequestAsync();if(request==null)return;
@@ -107,6 +109,7 @@ public sealed class BluetoothTransport:IDisposable
             if(request.Option==GattWriteOption.WriteWithResponse)request.Respond();
         }
         catch(Exception e){Status?.Invoke("Bluetooth write: "+e.Message);}
+        finally{receiveGate.Release();}
     }
     private void Receive(PacketStream stream,byte[] bytes,string ingress,Guid epoch)
     {

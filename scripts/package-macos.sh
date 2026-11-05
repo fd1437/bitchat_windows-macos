@@ -20,7 +20,8 @@ trap 'rm -rf "$stage_dir"' EXIT
 app_path="$stage_dir/BitChat.app"
 ditto "$build_dir/Build/Products/Release/bitchat.app" "$app_path"
 binary="$app_path/Contents/MacOS/bitchat"
-lipo "$binary" -verify_arch arm64 x86_64
+lipo "$binary" -verify_arch arm64
+lipo "$binary" -verify_arch x86_64
 
 # Apple Silicon requires an ad-hoc code seal. This uses no certificate,
 # supplies no Developer ID identity and does not notarize the application.

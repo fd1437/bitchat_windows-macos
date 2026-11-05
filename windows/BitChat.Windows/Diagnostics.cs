@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.Net;
+using System.Net.Http;
+using System.Text;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -12,6 +15,17 @@ namespace BitChat.Windows;
 
 public static class Diagnostics
 {
+    private sealed class UpdateDownloadHandler(byte[] payload):HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken)
+        {
+            bool checksum=request.RequestUri!.AbsolutePath.EndsWith(".txt",StringComparison.Ordinal);
+            byte[] bytes=checksum?Encoding.UTF8.GetBytes(Convert.ToHexString(SHA256.HashData(payload))+"  BitChat-Setup-unsigned.exe"):payload;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){RequestMessage=request,Content=new ByteArrayContent(bytes)});
+        }
+    }
+    private sealed class DownloadProgressLog:IProgress<DownloadProgress>
+    {public readonly List<DownloadProgress> Values=[];public void Report(DownloadProgress value)=>Values.Add(value);}
     private sealed record Result(string Name,bool Passed,string Detail);
     public static async Task Run(string reportPath)
     {
@@ -33,6 +47,21 @@ public static class Diagnostics
                 await using var controller=new AppController(store);int removed=await controller.CleanupExpiredMedia();
                 if(removed!=1||File.Exists(path)||store.State.Messages[0].Attachment!=null||!store.State.Messages[0].LocalAttachmentDeleted)throw new IOException("Expired media was not removed locally");
                 return "expired attachment file removed while retaining its message row";
+            }
+            finally{StateStore.OverrideRoot=prior;if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
+        });
+        await Check("Update download progress, checksum and file release",async()=>
+        {
+            string temporary=Path.Combine(Path.GetDirectoryName(reportPath)!,"bitchat-update-diagnostic-"+Guid.NewGuid().ToString("N"));string? prior=StateStore.OverrideRoot;StateStore.OverrideRoot=temporary;
+            try
+            {
+                var store=new StateStore();byte[] payload=RandomNumberGenerator.GetBytes(1024*1024);var progress=new DownloadProgressLog();
+                using var updater=new ReleaseUpdater(store,new UpdateDownloadHandler(payload));
+                var update=new AvailableUpdate("v0.1.9-windows-preview","0.1.9","https://github.com/fd1437/bitchat_windows-macos/releases/download/v0.1.9/BitChat-Setup-unsigned.exe","https://github.com/fd1437/bitchat_windows-macos/releases/download/v0.1.9/BitChat-Setup-unsigned.exe.sha256.txt","https://github.com/fd1437/bitchat_windows-macos/releases",new Version(0,1,9,0));
+                string file=await updater.DownloadVerifiedAsync(update,progress);
+                if(!File.ReadAllBytes(file).SequenceEqual(payload)||progress.Values.Count<2||!progress.Values[^1].Verified||progress.Values[^1].Total!=payload.Length)throw new IOException("Download progress or checksum verification failed");
+                File.Delete(file);if(File.Exists(file))throw new IOException("Downloaded installer is still held open");
+                return "streamed bytes and total, SHA-256 validated, file renamed and released on Windows";
             }
             finally{StateStore.OverrideRoot=prior;if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
         });

@@ -13,10 +13,10 @@ internal sealed record DownloadProgress(long Bytes,long? Total,bool Verified=fal
 
 internal sealed record AvailableUpdate(string Tag,string VersionText,string SetupUrl,string ChecksumUrl,string ReleaseUrl,Version Version);
 
-internal sealed class ReleaseUpdater(StateStore store):IDisposable
+internal sealed class ReleaseUpdater(StateStore store,HttpMessageHandler? handler=null):IDisposable
 {
     private const string ReleasesApi="https://api.github.com/repos/fd1437/bitchat_windows-macos/releases?per_page=20";
-    private readonly HttpClient http=new(new HttpClientHandler{AutomaticDecompression=DecompressionMethods.All}){Timeout=TimeSpan.FromSeconds(20)};
+    private readonly HttpClient http=new(handler??new HttpClientHandler{AutomaticDecompression=DecompressionMethods.All}){Timeout=TimeSpan.FromSeconds(20)};
     private readonly SemaphoreSlim gate=new(1,1);
     private DateTime retryAfterUtc=DateTime.MinValue;
     private static Version CurrentVersion=>Normalize(typeof(Program).Assembly.GetName().Version??new Version(0,0));
@@ -114,7 +114,8 @@ internal sealed class ReleaseUpdater(StateStore store):IDisposable
             await CopyLimitedAsync(checksumStream,checksumBuffer,16*1024,cancellation);string checksumText=Encoding.UTF8.GetString(checksumBuffer.ToArray());
             var match=System.Text.RegularExpressions.Regex.Match(checksumText,@"(?i)\b([0-9a-f]{64})\b");
             if(!match.Success)throw new InvalidDataException("The release checksum file is missing a SHA-256 digest");
-            byte[] expected=Convert.FromHexString(match.Groups[1].Value);await using var file=File.OpenRead(partial);byte[] actual=await SHA256.HashDataAsync(file,cancellation);
+            byte[] expected=Convert.FromHexString(match.Groups[1].Value);byte[] actual;
+            await using(var file=File.OpenRead(partial)){actual=await SHA256.HashDataAsync(file,cancellation);}
             if(!CryptographicOperations.FixedTimeEquals(expected,actual))throw new CryptographicException("The installer SHA-256 does not match the GitHub checksum");
             File.Move(partial,destination,true);progress?.Report(new(new FileInfo(destination).Length,length,true));return destination;
         }

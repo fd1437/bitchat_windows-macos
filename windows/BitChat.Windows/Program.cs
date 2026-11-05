@@ -49,7 +49,7 @@ public sealed partial class MainWindow:Window
     private readonly TextBlock title=new(){FontSize=20,FontWeight=FontWeights.SemiBold},status=new(){FontSize=11,TextTrimming=TextTrimming.CharacterEllipsis},network=new(){FontSize=11};
     private readonly Dictionary<string,TextBlock> receiptLabels=[];
     private string conversation="mesh";
-    private readonly SolidColorBrush bg=new(Color.FromRgb(13,17,20)),panel=new(Color.FromRgb(20,26,30)),green=new(Color.FromRgb(99,230,153)),muted=new(Color.FromRgb(151,166,175));
+    private SolidColorBrush bg=new(Color.FromRgb(13,17,20)),panel=new(Color.FromRgb(20,26,30)),green=new(Color.FromRgb(99,230,153)),muted=new(Color.FromRgb(151,166,175));
     private Button? filesButton,updateButton,maximizeButton;
     private ProgressBar? updateProgress;
     private readonly List<Button> chromeButtons=[];
@@ -162,10 +162,11 @@ public sealed partial class MainWindow:Window
     private void ApplyThemeColors()
     {
         bool dark=store.State.Dark,hack=store.State.HackMode;
-        bg.Color=dark?(hack?Color.FromRgb(13,17,20):Color.FromRgb(29,31,36)):Color.FromRgb(248,249,251);
-        panel.Color=dark?(hack?Color.FromRgb(20,26,30):Color.FromRgb(36,39,46)):Color.FromRgb(237,239,244);
-        green.Color=hack?(dark?Color.FromRgb(99,230,153):Color.FromRgb(0,112,70)):(dark?Color.FromRgb(138,148,255):Color.FromRgb(82,94,214));
-        muted.Color=dark?Color.FromRgb(158,165,181):Color.FromRgb(94,103,123);
+        Brush[] oldBrushes=[bg,panel,green,muted,Foreground];
+        bg=new SolidColorBrush(dark?(hack?Color.FromRgb(13,17,20):Color.FromRgb(29,31,36)):Color.FromRgb(248,249,251));
+        panel=new SolidColorBrush(dark?(hack?Color.FromRgb(20,26,30):Color.FromRgb(36,39,46)):Color.FromRgb(237,239,244));
+        green=new SolidColorBrush(hack?(dark?Color.FromRgb(99,230,153):Color.FromRgb(0,112,70)):(dark?Color.FromRgb(138,148,255):Color.FromRgb(82,94,214)));
+        muted=new SolidColorBrush(dark?Color.FromRgb(158,165,181):Color.FromRgb(94,103,123));
         Foreground=dark?new SolidColorBrush(Color.FromRgb(232,235,242)):new SolidColorBrush(Color.FromRgb(31,36,48));
         FontFamily=new FontFamily(hack?"Cascadia Mono, Consolas":"Segoe UI Variable, Segoe UI");FontSize=hack?13:14;
         Resources[typeof(Button)]=CreateButtonStyle(hack);
@@ -177,7 +178,17 @@ public sealed partial class MainWindow:Window
         }
         if(Content is Grid layout&&layout.ColumnDefinitions.Count>0)layout.ColumnDefinitions[0].Width=new GridLength(hack?240:276);
         input.Foreground=Foreground;foreach(var button in chromeButtons)button.Foreground=Foreground;
-        if(Content is DependencyObject root)RefreshTextBoxes(root);
+        Brush[] newBrushes=[bg,panel,green,muted,Foreground];
+        void Recolor(DependencyObject node)
+        {
+            var changes=new List<(DependencyProperty Property,Brush Value)>();var locals=node.GetLocalValueEnumerator();
+            while(locals.MoveNext())for(int index=0;index<oldBrushes.Length;index++)if(ReferenceEquals(locals.Current.Value,oldBrushes[index])){changes.Add((locals.Current.Property,newBrushes[index]));break;}
+            foreach(var change in changes)node.SetValue(change.Property,change.Value);
+            for(int child=0;child<VisualTreeHelper.GetChildrenCount(node);child++)Recolor(VisualTreeHelper.GetChild(node,child));
+        }
+        Background=bg;
+        if(Content is DependencyObject root){Recolor(root);RefreshTextBoxes(root);}
+        foreach(var toast in toastWindows.ToArray())Recolor(toast);
     }
     private Style CreateButtonStyle(bool hack)
     {

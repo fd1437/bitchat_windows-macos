@@ -45,11 +45,21 @@ public sealed class AppState
     public bool UseTor{get;set;}=false;
     public bool Dark{get;set;}=true;
     public bool Notifications{get;set;}=true;
-    public bool HideNotificationPreviews{get;set;}=true;
+    public bool HideNotificationPreviews{get;set;}
+    public bool NotificationPreviewSettingMigrated{get;set;}
     public bool LiveVoice{get;set;}=true;
+    public bool ShareBattery{get;set;}
+    public int FileRetentionDays{get;set;}
+    public List<StoredReaction> Reactions{get;set;}=[];
+    public string? UpdateETag{get;set;}
+    public string? UpdateTag{get;set;}
+    public string? UpdateSetupUrl{get;set;}
+    public string? UpdateChecksumUrl{get;set;}
+    public string? UpdateReleaseUrl{get;set;}
     public byte[] LocationKey(string cell){if(!LocationKeys.TryGetValue(cell,out var k))LocationKeys[cell]=k=Schnorr.GenerateKey();return k;}
 }
-public sealed record StoredMessage(string Conversation,string Id,string Sender,string Text,long Timestamp,bool Own=false,string Status="received",string? Attachment=null,string? Mime=null,string? Peer=null);
+public sealed record StoredMessage(string Conversation,string Id,string Sender,string Text,long Timestamp,bool Own=false,string Status="received",string? Attachment=null,string? Mime=null,string? Peer=null,bool LocalAttachmentDeleted=false);
+public sealed record StoredReaction(string Conversation,string MessageId,string Actor,string Nickname,string Emoji);
 
 public sealed class StateStore
 {
@@ -65,8 +75,9 @@ public sealed class StateStore
         {
             byte[] plain=ProtectedData.Unprotect(File.ReadAllBytes(FilePath),null,DataProtectionScope.CurrentUser);
             try{State=JsonSerializer.Deserialize<AppState>(plain)??throw new InvalidDataException("Invalid saved BitChat state");}finally{CryptographicOperations.ZeroMemory(plain);}
+            if(!State.NotificationPreviewSettingMigrated){State.HideNotificationPreviews=false;State.NotificationPreviewSettingMigrated=true;Save();}
         }
-        else{State=new();Save();}
+        else{State=new(){NotificationPreviewSettingMigrated=true};Save();}
     }
     public void Save()
     {

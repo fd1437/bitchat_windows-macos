@@ -27,7 +27,7 @@ public sealed partial class AppController:IAsyncDisposable
     public event Action<string,string>? Receipt;
     public AppController(StateStore store)
     {
-        Store=store;bridgeCourier=new(store.State.BridgeDrops,snapshot=>Post(()=>{if(snapshot.Revision>=Store.State.BridgeDrops.Revision){Store.State.BridgeDrops=snapshot;Store.Save();}}));ConfigureCourierBridge();mediaLedger=new(Path.Combine(StateStore.Root,"media"),ProtectMediaDecision,UnprotectMediaDecision);Mesh=new(store.State.NoiseKey,store.State.SigningSeed,store.State.Nickname,Bluetooth.Send){Capabilities=[0x79,0x03],IsBlocked=id=>Store.State.Blocked.Contains(id)};
+        Store=store;bridgeCourier=new(store.State.BridgeDrops,snapshot=>Post(()=>{if(snapshot.Revision>=Store.State.BridgeDrops.Revision){Store.State.BridgeDrops=snapshot;Store.Save();}}));ConfigureCourierBridge();mediaLedger=new(Path.Combine(StateStore.Root,"media"),ProtectMediaDecision,UnprotectMediaDecision);Mesh=new(store.State.NoiseKey,store.State.SigningSeed,store.State.Nickname,Bluetooth.Send){Capabilities=[0x79,0x03],IsBlocked=id=>Store.State.Blocked.Contains(id),BatteryPercent=()=>Store.State.ShareBattery?LocalBatteryPercent():null};
         foreach(var pair in Store.State.KnownPeers){Peers[pair.Key]=pair.Value with{LastSeen=0,Authenticated=false};Mesh.RestorePeer(pair.Value);}
         foreach(var pair in Store.State.PinnedSigningKeys)Mesh.RestorePinnedKey(pair.Key,pair.Value);
         Mesh.RestoreArchive(Store.State.GossipArchive);
@@ -259,6 +259,9 @@ public sealed partial class AppController:IAsyncDisposable
                 if(!Peers.TryGetValue(peer,out var voucher)||!voucher.Authenticated)return;string voucherFingerprint=Bytes.Hex(Crypto.Hash(voucher.NoiseKey));if(!Store.State.Verified.ContainsKey(voucherFingerprint))return;
                 var attestations=Vouch.ParseBatch(bytes).Where(v=>v.Valid(voucher.SigningKey)).ToList();Store.State.Vouches[voucherFingerprint]=attestations;Store.Save();Status?.Invoke($"Received {attestations.Count} identity attestations from {voucher.Nickname}");
             }
+            else if(type==0x30)ReceiveReaction(peer,bytes,true);
+            else if(type==0x31&&bytes.Length==1&&bytes[0]<=1)TypingChanged?.Invoke(peer,bytes[0]==1);
+            else if(type==0x2A)ReceiveReaction(peer,bytes,false);
             else if(type==0x23)
             {
                 var fields=Tlv16.Parse(bytes);byte kind=fields.Require(1,1)[0];

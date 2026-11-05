@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Input;
+using System.Windows.Shell;
 using Microsoft.Win32;
 using BitChat.Core;
 
@@ -19,12 +20,13 @@ public static class Program
             app.DispatcherUnhandledException+=(_,e)=>{MessageBox.Show(e.Exception.Message,"BitChat",MessageBoxButton.OK,MessageBoxImage.Error);e.Handled=true;};
             using var instance=new Mutex(true,@"Local\BitChat.Windows.Instance",out bool first);
             using var activate=new EventWaitHandle(false,EventResetMode.AutoReset,@"Local\BitChat.Windows.Activate");
+            using var updateLatest=new EventWaitHandle(false,EventResetMode.AutoReset,@"Local\BitChat.Windows.InstallLatest");
             bool background=args.Contains("--background");
-            if(!first){if(!background)activate.Set();return;}
+            if(!first){if(args.Contains("--install-latest"))updateLatest.Set();if(!background)activate.Set();return;}
             app.ShutdownMode=ShutdownMode.OnExplicitShutdown;
-            var store=new StateStore();var window=new MainWindow(store,false,background);
+            var store=new StateStore();var window=new MainWindow(store,false,background,args.Contains("--install-latest"));
             var activationTimer=new System.Windows.Threading.DispatcherTimer{Interval=TimeSpan.FromMilliseconds(500)};
-            activationTimer.Tick+=(_,_)=>{if(activate.WaitOne(0))window.RestoreFromTray();};activationTimer.Start();
+            activationTimer.Tick+=(_,_)=>{if(activate.WaitOne(0))window.RestoreFromTray();if(updateLatest.WaitOne(0))_=window.RequestUpdateInstall();};activationTimer.Start();
             app.SessionEnding+=(_,_)=>window.EndWindowsSession();
             app.Run(window);activationTimer.Stop();
         }
@@ -42,34 +44,52 @@ public sealed partial class MainWindow:Window
     private readonly TextBlock title=new(){FontSize=20,FontWeight=FontWeights.SemiBold},status=new(){FontSize=11,TextTrimming=TextTrimming.CharacterEllipsis},network=new(){FontSize=11};
     private readonly Dictionary<string,TextBlock> receiptLabels=[];
     private string conversation="mesh";
-    private readonly Brush bg=new SolidColorBrush(Color.FromRgb(13,17,20)),panel=new SolidColorBrush(Color.FromRgb(20,26,30)),green=new SolidColorBrush(Color.FromRgb(99,230,153)),muted=new SolidColorBrush(Color.FromRgb(151,166,175));
+    private readonly SolidColorBrush bg=new(Color.FromRgb(13,17,20)),panel=new(Color.FromRgb(20,26,30)),green=new(Color.FromRgb(99,230,153)),muted=new(Color.FromRgb(151,166,175));
+    private Button? filesButton,updateButton;
+    private readonly List<Button> chromeButtons=[];
+    private readonly TextBlock typingLabel=new(){FontSize=11};
+    private readonly Dictionary<string,long> typingPeers=[];
+    private readonly System.Windows.Threading.DispatcherTimer typingTimer=new(){Interval=TimeSpan.FromSeconds(1)};
+    private readonly System.Windows.Threading.DispatcherTimer typingStopTimer=new(){Interval=TimeSpan.FromSeconds(2)};
+    private readonly System.Windows.Threading.DispatcherTimer updateCheckTimer=new(){Interval=TimeSpan.FromSeconds(10)};
+    private ReleaseUpdater? updater;
+    private AvailableUpdate? availableUpdate;
+    private bool updating;
+    private readonly bool installLatestOnLaunch;
     private long lastPanic;private int panicTaps;private bool closing;
     private readonly System.Windows.Forms.NotifyIcon tray=new(){Text="BitChat",Visible=true};
-    public MainWindow(StateStore store,bool diagnostics=false,bool background=false)
+    public MainWindow(StateStore store,bool diagnostics=false,bool background=false,bool installLatest=false)
     {
         tray.Visible=!diagnostics;
-        this.store=store;controller=new(store);Title="bitchat · Windows";Width=1120;Height=780;MinWidth=780;MinHeight=520;Background=bg;Foreground=Brushes.WhiteSmoke;FontFamily=new FontFamily("Cascadia Mono, Consolas");FontSize=13;
-        var root=new Grid{Background=bg};root.ColumnDefinitions.Add(new(){Width=new GridLength(240)});root.ColumnDefinitions.Add(new(){Width=new GridLength(1,GridUnitType.Star)});Content=root;
-        var sidebar=new DockPanel{Background=panel,Margin=new Thickness(0,0,1,0)};root.Children.Add(sidebar);
+        this.store=store;installLatestOnLaunch=installLatest;controller=new(store);Title="bitchat · Windows";Width=1120;Height=780;MinWidth=780;MinHeight=520;WindowStyle=WindowStyle.None;ResizeMode=ResizeMode.CanResize;Background=bg;FontFamily=new FontFamily("Cascadia Mono, Consolas");FontSize=13;ApplyThemeColors();
+        WindowChrome.SetWindowChrome(this,new WindowChrome{CaptionHeight=38,ResizeBorderThickness=new Thickness(6),GlassFrameThickness=new Thickness(0),UseAeroCaptionButtons=false});
+        var root=new Grid{Background=bg};root.RowDefinitions.Add(new(){Height=new GridLength(38)});root.RowDefinitions.Add(new(){Height=new GridLength(1,GridUnitType.Star)});root.ColumnDefinitions.Add(new(){Width=new GridLength(240)});root.ColumnDefinitions.Add(new(){Width=new GridLength(1,GridUnitType.Star)});Content=root;
+        var titleBar=new DockPanel{Background=panel,LastChildFill=true};Grid.SetRow(titleBar,0);Grid.SetColumnSpan(titleBar,2);root.Children.Add(titleBar);
+        var windowButtons=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};
+        Button ChromeButton(string label,Action click){var b=new Button{Content=label,Width=44,Height=34,Background=Brushes.Transparent,Foreground=Foreground,BorderThickness=new Thickness(0),FontSize=15,Cursor=Cursors.Hand};b.Click+=(_,_)=>click();windowButtons.Children.Add(b);chromeButtons.Add(b);return b;}
+        ChromeButton("—",()=>WindowState=WindowState.Minimized);ChromeButton("□",()=>WindowState=WindowState==WindowState.Maximized?WindowState.Normal:WindowState.Maximized);ChromeButton("×",()=>Hide());DockPanel.SetDock(windowButtons,Dock.Right);titleBar.Children.Add(windowButtons);
+        titleBar.Children.Add(new TextBlock{Text="  ◉  bitchat  ·  Windows",Foreground=green,FontWeight=FontWeights.SemiBold,VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(8,0,0,0)});
+        var sidebar=new DockPanel{Background=panel,Margin=new Thickness(0,0,1,0)};Grid.SetRow(sidebar,1);root.Children.Add(sidebar);
         var brand=new Button{Content="bitchat",Foreground=green,Background=Brushes.Transparent,BorderThickness=new Thickness(0),FontSize=28,FontWeight=FontWeights.Bold,HorizontalContentAlignment=HorizontalAlignment.Left,Padding=new Thickness(20)};
         brand.ToolTip="Triple-click to wipe local identities and messages";brand.Click+=async(_,_)=>await PanicTap();DockPanel.SetDock(brand,Dock.Top);sidebar.Children.Add(brand);
-        var footer=new StackPanel{Margin=new Thickness(16)};network.Foreground=muted;network.Text="connecting…";footer.Children.Add(network);footer.Children.Add(Button("settings / identity",()=>ShowSettings()));DockPanel.SetDock(footer,Dock.Bottom);sidebar.Children.Add(footer);
+        var footer=new StackPanel{Margin=new Thickness(16)};network.Foreground=muted;network.Text="connecting…";footer.Children.Add(network);footer.Children.Add(Button("settings / identity",()=>ShowSettings()));updateButton=Button("● update available",()=>_=InstallUpdate());updateButton.Visibility=Visibility.Collapsed;footer.Children.Add(updateButton);DockPanel.SetDock(footer,Dock.Bottom);sidebar.Children.Add(footer);
         sidebar.Children.Add(new ScrollViewer{Content=channels,VerticalScrollBarVisibility=ScrollBarVisibility.Auto});
-        var main=new DockPanel{Margin=new Thickness(24,18,24,12)};Grid.SetColumn(main,1);root.Children.Add(main);
+        var main=new DockPanel{Margin=new Thickness(24,18,24,12)};Grid.SetRow(main,1);Grid.SetColumn(main,1);root.Children.Add(main);
         var heading=new DockPanel{Margin=new Thickness(0,0,0,12)};var controls=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};
-        controls.Children.Add(Button("clear",()=>ClearChat()));controls.Children.Add(Button("identity",()=>ShowIdentity()));DockPanel.SetDock(controls,Dock.Right);heading.Children.Add(controls);heading.Children.Add(title);DockPanel.SetDock(heading,Dock.Top);main.Children.Add(heading);
+        filesButton=Button("files",ShowConversationFiles);filesButton.ToolTip="Show conversation files and remove selected local copies";controls.Children.Add(filesButton);controls.Children.Add(Button("clear",()=>ClearChat()));controls.Children.Add(Button("identity",()=>ShowIdentity()));DockPanel.SetDock(controls,Dock.Right);heading.Children.Add(controls);
+        var titleStack=new StackPanel();typingLabel.Foreground=muted;titleStack.Children.Add(title);titleStack.Children.Add(typingLabel);heading.Children.Add(titleStack);DockPanel.SetDock(heading,Dock.Top);main.Children.Add(heading);
         var bottom=new StackPanel();status.Foreground=muted;status.Margin=new Thickness(0,10,0,0);status.Text="/help for commands";bottom.Children.Add(status);DockPanel.SetDock(bottom,Dock.Bottom);main.Children.Add(bottom);
         var composer=new DockPanel{Margin=new Thickness(0,12,0,0)};var send=Button("send ↵",async()=>await Send());DockPanel.SetDock(send,Dock.Right);composer.Children.Add(send);
         var attach=Button("+",async()=>await Attach());attach.ToolTip="Send file, image or voice note (1 MiB)";DockPanel.SetDock(attach,Dock.Left);composer.Children.Add(attach);
         var voice=Button("mic",async()=>await Guard(async()=>{if(controller.IsRecording)await controller.EndVoice(false);else await controller.BeginVoice(conversation,false);}));voice.ToolTip="Click to record, click again to send";DockPanel.SetDock(voice,Dock.Left);composer.Children.Add(voice);
         var ptt=Button("hold to talk",()=>{});ptt.PreviewMouseLeftButtonDown+=async(_,e)=>{e.Handled=true;ptt.CaptureMouse();await Guard(()=>controller.BeginVoice(conversation,true));};ptt.PreviewMouseLeftButtonUp+=async(_,e)=>{e.Handled=true;ptt.ReleaseMouseCapture();await Guard(()=>controller.EndVoice(false));};DockPanel.SetDock(ptt,Dock.Left);composer.Children.Add(ptt);
-        input.Background=panel;input.Foreground=Brushes.WhiteSmoke;input.CaretBrush=green;input.BorderBrush=new SolidColorBrush(Color.FromRgb(48,63,70));input.Padding=new Thickness(10);input.PreviewKeyDown+=async(_,e)=>{if(e.Key==Key.Enter&&(Keyboard.Modifiers&ModifierKeys.Shift)==0){e.Handled=true;await Send();}};composer.Children.Add(input);DockPanel.SetDock(composer,Dock.Bottom);main.Children.Add(composer);
+        input.Background=panel;input.Foreground=Foreground;input.CaretBrush=green;input.BorderBrush=new SolidColorBrush(Color.FromRgb(48,63,70));input.Padding=new Thickness(10);input.TextChanged+=(_,_)=>ComposerChanged();input.PreviewKeyDown+=async(_,e)=>{if(e.Key==Key.Enter&&(Keyboard.Modifiers&ModifierKeys.Shift)==0){e.Handled=true;await Send();}};composer.Children.Add(input);DockPanel.SetDock(composer,Dock.Bottom);main.Children.Add(composer);
         scroll=new ScrollViewer{Content=messages,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};main.Children.Add(scroll);
         try{tray.Icon=System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!);}catch{}tray.DoubleClick+=(_,_)=>Ui(RestoreFromTray);
         var trayMenu=new System.Windows.Forms.ContextMenuStrip();
         trayMenu.Items.Add("Open BitChat",null,(_,_)=>Ui(RestoreFromTray));
         trayMenu.Items.Add("Quit BitChat",null,(_,_)=>Ui(async()=>await Quit()));tray.ContextMenuStrip=trayMenu;
-        Deactivated+=(_,_)=>_=controller.StopVoiceAutoplay();BindController();RefreshChannels();Select("mesh");if(!diagnostics)
+        Deactivated+=(_,_)=>_=controller.StopVoiceAutoplay();typingTimer.Tick+=(_,_)=>RefreshTypingLabel();typingTimer.Start();typingStopTimer.Tick+=(_,_)=>{typingStopTimer.Stop();SendTyping(false);};updateCheckTimer.Tick+=async(_,_)=>await CheckForUpdates();BindController();RefreshChannels();Select("mesh");if(!diagnostics)
         {
             bool started=false;
             Loaded+=async(_,_)=>
@@ -82,6 +102,8 @@ public sealed partial class MainWindow:Window
                     await Guard(()=>{StartupRegistration.Set(enabled);StartupRegistration.Prompted=true;return Task.CompletedTask;});
                 }
                 await Guard(()=>controller.Start());
+                await Guard(async()=>{int removed=await controller.CleanupExpiredMedia();if(removed>0)status.Text=$"Removed {removed} expired local file(s)";});
+                ReleaseUpdater.CleanupStaleFiles();updater=new(store);updateCheckTimer.Start();_=CheckForUpdates();if(installLatestOnLaunch)_=RequestUpdateInstall();
             };
         }
         Closing+=(_,e)=>{if(closing)return;e.Cancel=true;Hide();};
@@ -90,11 +112,23 @@ public sealed partial class MainWindow:Window
     private async Task Quit()
     {
         if(closing)return;closing=true;
+        typingTimer.Stop();typingStopTimer.Stop();updateCheckTimer.Stop();SendTyping(false);updater?.Dispose();updater=null;
         try{await controller.DisposeAsync();}
         finally{tray.Visible=false;tray.Dispose();Application.Current.Shutdown();}
     }
-    public void EndWindowsSession(){closing=true;tray.Visible=false;tray.Dispose();_=controller.DisposeAsync();}
-    public async Task ShutdownDiagnostics(){closing=true;await controller.DisposeAsync();tray.Visible=false;tray.Dispose();}
+    public void EndWindowsSession(){closing=true;typingTimer.Stop();typingStopTimer.Stop();updateCheckTimer.Stop();tray.Visible=false;tray.Dispose();updater?.Dispose();_=controller.DisposeAsync();}
+    public async Task ShutdownDiagnostics(){closing=true;typingTimer.Stop();typingStopTimer.Stop();updateCheckTimer.Stop();updater?.Dispose();await controller.DisposeAsync();tray.Visible=false;tray.Dispose();}
+    private void ApplyThemeColors()
+    {
+        bool dark=store.State.Dark;
+        bg.Color=dark?Color.FromRgb(13,17,20):Color.FromRgb(246,248,249);panel.Color=dark?Color.FromRgb(20,26,30):Color.FromRgb(232,237,239);
+        green.Color=dark?Color.FromRgb(99,230,153):Color.FromRgb(0,112,70);muted.Color=dark?Color.FromRgb(151,166,175):Color.FromRgb(83,96,103);
+        Foreground=dark?Brushes.WhiteSmoke:Brushes.Black;
+        input.Foreground=Foreground;foreach(var button in chromeButtons)button.Foreground=Foreground;
+        if(Content is DependencyObject root)RefreshTextBoxes(root);
+    }
+    private void RefreshTextBoxes(DependencyObject node)
+    {if(node is TextBox textBox)textBox.Foreground=Foreground;for(int i=0;i<VisualTreeHelper.GetChildrenCount(node);i++)RefreshTextBoxes(VisualTreeHelper.GetChild(node,i));}
     private Button Button(string text,Action action)
     {var b=new Button{Content=text,Background=panel,Foreground=green,BorderBrush=new SolidColorBrush(Color.FromRgb(48,63,70)),Padding=new Thickness(9,7,9,7),Margin=new Thickness(3),Cursor=Cursors.Hand};b.Click+=(_,_)=>action();return b;}
     private void Ui(Action action){if(Dispatcher.CheckAccess())action();else Dispatcher.BeginInvoke(action);}
@@ -104,7 +138,8 @@ public sealed partial class MainWindow:Window
         controller.ConfirmLegacyMedia=peer=>Task.FromResult(MessageBox.Show(this,"This contact ("+peer+") has not proved encrypted attachment support. Send this attachment without end-to-end encryption? Nearby relays may read it. This approval applies only to this send.","Legacy attachment",MessageBoxButton.YesNo,MessageBoxImage.Warning)==MessageBoxResult.Yes);
         controller.Status+=s=>Ui(()=>{status.Text=s;network.Text=$"BLE {controller.Bluetooth.Connections} · relays {controller.Relays.Connected}";});
         controller.PeersChanged+=()=>Ui(()=>{RefreshChannels();network.Text=$"BLE {controller.Bluetooth.Connections} · relays {controller.Relays.Connected} · nearby {controller.NearbyPresence}";});controller.TimelineChanged+=()=>Ui(()=>Select(conversation));
-        controller.Message+=m=>Ui(()=>{if(!m.Own&&!IsActive&&store.State.Notifications){var notification=NotificationContent.ForMessage(m.Sender,m.Text,store.State.HideNotificationPreviews);tray.ShowBalloonTip(5000,notification.Title,notification.Body,System.Windows.Forms.ToolTipIcon.Info);}if(m.Conversation==conversation){Append(m);scroll.ScrollToEnd();if(CanMarkRead(m)&&!m.Own&&m.Conversation.StartsWith("mesh:"))_=controller.MarkMeshRead(m);if(IsActive&&!m.Own&&m.Conversation.StartsWith("nostr:"))_=controller.MarkNostrRead(m.Conversation[6..],m.Id); }else if(!m.Own)status.Text=$"New message from {m.Sender}";RefreshChannels();});
+        controller.Message+=m=>Ui(()=>{if(!m.Own&&store.State.Notifications&&(!IsActive||m.Conversation!=conversation))ShowMessageToast(m);if(m.Conversation==conversation){Append(m);scroll.ScrollToEnd();if(CanMarkRead(m)&&!m.Own&&m.Conversation.StartsWith("mesh:"))_=controller.MarkMeshRead(m);if(IsActive&&!m.Own&&m.Conversation.StartsWith("nostr:"))_=controller.MarkNostrRead(m.Conversation[6..],m.Id); }else if(!m.Own)status.Text=$"New message from {m.Sender}";RefreshChannels();});
+        controller.TypingChanged+=(peer,isTyping)=>Ui(()=>{if(isTyping)typingPeers[peer]=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();else typingPeers.Remove(peer);RefreshTypingLabel();});
         controller.Receipt+=(id,value)=>Ui(()=>{if(receiptLabels.TryGetValue(id,out var label))label.Text=value;});
     }
     private void RefreshChannels()
@@ -115,7 +150,7 @@ public sealed partial class MainWindow:Window
         if(Geohash.Valid(store.State.Cell)){Channel("geo:"+store.State.Cell,"# "+store.State.Cell);Channel("notes:"+store.State.Cell,"⌖ nearby notes");}
         channels.Children.Add(Button("+ location channel",()=>JoinLocation()));Label("GROUPS");foreach(var g in store.State.Groups.Values)Channel(g.Conversation,"# "+g.Name);channels.Children.Add(Button("+ private group",CreateGroup));Label("NEARBY");
         foreach(var p in controller.Peers.Values.Where(p=>p.LastSeen>Bytes.Now-120000&&!store.State.Blocked.Contains(p.Id)).OrderBy(p=>p.Nickname))
-        {string favorite=store.State.Favorites.Contains(p.Id)?"★ ":"";string verified=store.State.Verified.ContainsKey(Bytes.Hex(Crypto.Hash(p.NoiseKey)))?"✓ ":"";Channel("mesh:"+p.Id,$"{favorite}{verified}{(p.Authenticated?"●":"○")} {p.Nickname}");}
+        {string favorite=store.State.Favorites.Contains(p.Id)?"★ ":"";string verified=store.State.Verified.ContainsKey(Bytes.Hex(Crypto.Hash(p.NoiseKey)))?"✓ ":"";string battery=p.BatteryPercent is byte value?$" · {value}% ⚡":"";Channel("mesh:"+p.Id,$"{favorite}{verified}{(p.Authenticated?"●":"○")} {p.Nickname}{battery}");}
         foreach(var recent in store.State.Messages.Where(m=>m.Conversation.StartsWith("mesh:")&&!store.State.Blocked.Contains(m.Conversation[5..]))
             .GroupBy(m=>m.Conversation).Select(g=>g.OrderByDescending(m=>m.Timestamp).First()).OrderByDescending(m=>m.Timestamp))
             if(!controller.Peers.TryGetValue(recent.Conversation[5..],out var live)||live.LastSeen<=Bytes.Now-120000)
@@ -125,11 +160,13 @@ public sealed partial class MainWindow:Window
     }
     private void Select(string id)
     {
+        SendTyping(false);typingStopTimer.Stop();activeTypingPeer=null;
         conversation=id;title.Text=id switch{"mesh"=>"# bluetooth mesh","board"=>"⌖ mesh board",_ when id.StartsWith("mesh:")=>"@ "+(controller.Peers.GetValueOrDefault(id[5..])?.Nickname??id[5..]),_ when id.StartsWith("group:")=>"# "+store.State.Groups[id].Name,_ when id.StartsWith("nostr:")=>"@ "+store.State.NostrPeers.GetValueOrDefault(id[6..],id[6..8]),_ when id.StartsWith("notes:")=>"⌖ notes #"+id[6..],_=>"# "+id[4..]};
+        if(filesButton!=null){int count=store.State.Messages.Count(m=>m.Conversation==id&&m.Mime!=null);filesButton.Content=$"files · {count}";filesButton.IsEnabled=count>0;}
         messages.Children.Clear();receiptLabels.Clear();StoredMessage[] history;lock(store.State.Messages)history=store.State.Messages.Where(m=>m.Conversation==id).OrderBy(m=>m.Timestamp).TakeLast(500).ToArray();foreach(var m in history)Append(m);
         if(history.Length==0)messages.Children.Add(new TextBlock{Text=id=="mesh"?"Messages travel through nearby devices over Bluetooth LE.\nChoose a location channel to chat over Nostr relays.":"No messages yet.",Foreground=muted,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,20,0,20)});
         foreach(var message in history.Where(m=>CanMarkRead(m)&&!m.Own&&m.Status!="read"&&m.Conversation.StartsWith("mesh:")))_=controller.MarkMeshRead(message);
-        RefreshChannels();scroll.ScrollToEnd();input.Focus();
+        RefreshChannels();RefreshTypingLabel();scroll.ScrollToEnd();input.Focus();
     }
     private void Append(StoredMessage m)
     {
@@ -137,14 +174,19 @@ public sealed partial class MainWindow:Window
         var header=new StackPanel{Orientation=Orientation.Horizontal};header.Children.Add(new TextBlock{Text=m.Sender,Foreground=m.Own?green:Brushes.LightSkyBlue,FontWeight=FontWeights.SemiBold});
         header.Children.Add(new TextBlock{Text="  "+DateTimeOffset.FromUnixTimeMilliseconds(m.Timestamp).ToLocalTime().ToString("HH:mm"),Foreground=muted,FontSize=10,VerticalAlignment=VerticalAlignment.Center});
         if(m.Own){var label=new TextBlock{Text="  "+m.Status,Foreground=muted,FontSize=10};receiptLabels[m.Id]=label;header.Children.Add(label);}block.Children.Add(header);
-        var text=new TextBox{Text=m.Text,IsReadOnly=true,TextWrapping=TextWrapping.Wrap,BorderThickness=new Thickness(0),Background=Brushes.Transparent,Foreground=Brushes.WhiteSmoke,Padding=new Thickness(0,4,0,0)};block.Children.Add(text);
+        var text=new TextBox{Text=m.LocalAttachmentDeleted?"File deleted on this device · "+m.Text:m.Text,IsReadOnly=true,TextWrapping=TextWrapping.Wrap,BorderThickness=new Thickness(0),Background=Brushes.Transparent,Foreground=Foreground,Padding=new Thickness(0,4,0,0)};block.Children.Add(text);
         if(m.Conversation=="board"&&m.Own)block.Children.Add(Button("delete note",async()=>await Guard(async()=>{await controller.DeleteBoard(m.Id);Select("board");})));
         try{if(m.Text.StartsWith("cashu")){var token=Cashu.Decode(m.Text);block.Children.Add(Button($"{token.Amount} {token.Unit} · {token.Mint} · copy token",()=>Clipboard.SetText(token.Token)));}}catch{}
         if(IsImage(m))block.Children.Add(ImageAttachment(m));
         if(m.Attachment!=null&&m.Mime?.StartsWith("audio/")==true)block.Children.Add(Button("play voice note",async()=>await Guard(()=>PlayAudio(m))));
         if(m.Attachment!=null)block.Children.Add(Button("save attachment · "+m.Text,()=>ExportAttachment(m)));
+        var choices=new StackPanel{Orientation=Orientation.Horizontal};
+        foreach(var group in store.State.Reactions.Where(r=>r.Conversation==m.Conversation&&r.MessageId==m.Id).GroupBy(r=>r.Emoji).OrderBy(g=>Array.IndexOf(ReactionOptions,g.Key)))
+            choices.Children.Add(Button(group.Key+" "+group.Count(),async()=>await Guard(()=>controller.ToggleReaction(m,group.Key))));
+        var picker=Button("react…",()=>{});var menu=new ContextMenu();foreach(string emoji in ReactionOptions){var item=new MenuItem{Header=emoji};item.Click+=async(_,_)=>await Guard(()=>controller.ToggleReaction(m,emoji));menu.Items.Add(item);}picker.ContextMenu=menu;picker.Click+=(_,_)=>menu.IsOpen=true;choices.Children.Add(picker);block.Children.Add(choices);
         messages.Children.Add(block);
     }
+    private static readonly string[] ReactionOptions=["👍","❤️","😂","😮","😢","🙏"];
     private async Task Guard(Func<Task> action)
     {try{await action();}catch(Exception e){status.Text=e.Message;}}
     private bool sending;
@@ -152,7 +194,7 @@ public sealed partial class MainWindow:Window
     {
         if(sending)return;string original=input.Text,text=original.Trim();if(text.Length==0)return;
         sending=true;
-        try{await Guard(async()=>{if(text.StartsWith('/'))await Command(text);else await controller.Send(conversation,text);if(input.Text==original)input.Clear();});}
+        try{await Guard(async()=>{if(text.StartsWith('/'))await Command(text);else await controller.Send(conversation,text);SendTyping(false);if(input.Text==original)input.Clear();});}
         finally{sending=false;}
     }
     private async Task Command(string text)
@@ -183,7 +225,20 @@ public sealed partial class MainWindow:Window
     }
     private void SystemMessage(string text)=>Append(new(conversation,Guid.NewGuid().ToString(),"system",text,Bytes.Now));
     private async void ClearChat(){await Guard(async()=>{await controller.ClearConversation(conversation);Select(conversation);});}
-    private async Task Attach(){var picker=new OpenFileDialog{Title="Send attachment (up to 1 MiB)"};if(picker.ShowDialog(this)==true)await Guard(()=>controller.SendMedia(conversation,picker.FileName));}
+    private async Task Attach()
+    {
+        var picker=new OpenFileDialog{Title="Select files to send (up to 1 MiB each)",Multiselect=true,CheckFileExists=true};
+        if(picker.ShowDialog(this)!=true||picker.FileNames.Length==0)return;
+        int sent=0,failed=0;status.Text=$"Sending 0/{picker.FileNames.Length} files…";
+        foreach(string file in picker.FileNames)
+        {
+            try{await controller.SendMedia(conversation,file);sent++;}
+            catch(Exception e){failed++;status.Text=$"Could not send {Path.GetFileName(file)}: {e.Message}";}
+            status.Text=$"Sending files · {sent+failed}/{picker.FileNames.Length} · {sent} sent, {failed} failed";
+            if(failed+sent<picker.FileNames.Length)await Task.Delay(80);
+        }
+        status.Text=failed==0?$"Sent {sent} file(s)":$"Sent {sent} file(s); {failed} failed";
+    }
     private async Task PlayAudio(StoredMessage message)
     {
         var bytes=store.ReadMedia(message.Attachment!);using var codec=AudioProcess.Start(["-i","pipe:0","-t","600","-f","s16le","-ar","16000","-ac","1","pipe:1"]);var errors=codec.StandardError.ReadToEndAsync();using var decoded=new MemoryStream();
@@ -223,10 +278,15 @@ public sealed partial class MainWindow:Window
     }
     private void ShowSettings()
     {
-        var d=new Window{Owner=this,Title="BitChat settings",Width=560,Height=710,Background=bg,Foreground=Foreground,WindowStartupLocation=WindowStartupLocation.CenterOwner};var p=new StackPanel{Margin=new Thickness(24)};d.Content=new ScrollViewer{Content=p,VerticalScrollBarVisibility=ScrollBarVisibility.Auto};
+        var d=new Window{Owner=this,Title="BitChat settings",Width=600,Height=800,Background=bg,Foreground=Foreground,WindowStartupLocation=WindowStartupLocation.CenterOwner};var p=new StackPanel{Margin=new Thickness(24)};d.Content=new ScrollViewer{Content=p,VerticalScrollBarVisibility=ScrollBarVisibility.Auto};
         p.Children.Add(new TextBlock{Text="identity & connections",FontSize=22,Foreground=green,Margin=new Thickness(0,0,0,20)});
         var startupOption=new CheckBox{Content="Start BitChat when I sign in to Windows",IsChecked=StartupRegistration.Enabled,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(startupOption);
         p.Children.Add(new TextBlock{Text="Closing the window keeps BitChat connected in the notification area. Use its tray menu to quit.",TextWrapping=TextWrapping.Wrap,Foreground=muted,Margin=new Thickness(0,0,0,16)});
+        var lightOption=new CheckBox{Content="Use light theme",IsChecked=!store.State.Dark,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(lightOption);
+        var batteryOption=new CheckBox{Content="Share my battery percentage with nearby BitChat users",IsChecked=store.State.ShareBattery,Foreground=green,Margin=new Thickness(0,0,0,12)};p.Children.Add(batteryOption);
+        p.Children.Add(new TextBlock{Text="Keep received files"});var retention=new ComboBox{Margin=new Thickness(0,6,0,16),Background=panel,Foreground=Foreground};
+        foreach(var option in new[]{(Days:0,Label:"Never delete"),(Days:1,Label:"1 day"),(Days:7,Label:"7 days"),(Days:30,Label:"30 days")})retention.Items.Add(new ComboBoxItem{Content=option.Label,Tag=option.Days});
+        retention.SelectedIndex=Array.FindIndex(new[]{0,1,7,30},n=>n==store.State.FileRetentionDays);if(retention.SelectedIndex<0)retention.SelectedIndex=0;p.Children.Add(retention);
         p.Children.Add(new TextBlock{Text="nickname"});var nick=new TextBox{Text=store.State.Nickname,Margin=new Thickness(0,6,0,16)};p.Children.Add(nick);
         p.Children.Add(new TextBlock{Text="Nostr relays · one wss:// URL per line"});var urls=new TextBox{Text=string.Join("\n",store.State.Relays),AcceptsReturn=true,Height=100,Margin=new Thickness(0,6,0,16)};p.Children.Add(urls);
         var gatewayOption=new CheckBox{Content="Share Nostr access with the nearby mesh",IsChecked=store.State.Gateway,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(gatewayOption);var bridgeOption=new CheckBox{Content="Internet bridge (mesh and private courier drops)",IsChecked=store.State.Bridge,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(bridgeOption);
@@ -235,7 +295,8 @@ public sealed partial class MainWindow:Window
         var previewsOption=new CheckBox{Content="Hide notification previews (sender, text and location)",IsChecked=store.State.HideNotificationPreviews,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(previewsOption);
         var liveOption=new CheckBox{Content="Live push-to-talk (autoplay only while this app is active)",IsChecked=store.State.LiveVoice,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(liveOption);
         p.Children.Add(new TextBlock{Text="Keys, history and attachments are encrypted for your Windows account with DPAPI. Relay changes take effect after restarting BitChat.",TextWrapping=TextWrapping.Wrap,Foreground=muted});
-        p.Children.Add(Button("save",()=>{string n=nick.Text.Trim();if(Bytes.Utf8(n).Length is <1 or >64){MessageBox.Show(d,"Nickname must contain 1–64 UTF-8 bytes.");return;}var relays=urls.Text.Split('\n',StringSplitOptions.TrimEntries|StringSplitOptions.RemoveEmptyEntries);if(relays.Any(u=>!Uri.TryCreate(u,UriKind.Absolute,out var uri)||uri.Scheme!="wss")){MessageBox.Show(d,"Relays must use wss://");return;}try{StartupRegistration.Set(startupOption.IsChecked==true);StartupRegistration.Prompted=true;}catch(Exception error){MessageBox.Show(d,"Could not update Windows startup: "+error.Message);return;}store.State.Notifications=notificationsOption.IsChecked==true;store.State.HideNotificationPreviews=previewsOption.IsChecked==true;store.State.LiveVoice=liveOption.IsChecked==true;if(!store.State.LiveVoice)_=controller.StopVoiceAutoplay();store.State.Gateway=gatewayOption.IsChecked==true;store.State.Bridge=bridgeOption.IsChecked==true;_=controller.RefreshGateway();store.State.UseTor=torOption.IsChecked==true;store.State.Nickname=n;store.State.Relays=relays.ToList();controller.Mesh.Nickname=n;store.Save();_=controller.Mesh.Announce();d.Close();}));
+        p.Children.Add(new TextBlock{Text="BitChat checks GitHub releases every 10 seconds while online and displays an update button when a newer version is available.",TextWrapping=TextWrapping.Wrap,Foreground=muted,Margin=new Thickness(0,12,0,12)});
+        p.Children.Add(Button("save",()=>{string n=nick.Text.Trim();if(Bytes.Utf8(n).Length is <1 or >64){MessageBox.Show(d,"Nickname must contain 1–64 UTF-8 bytes.");return;}var relays=urls.Text.Split('\n',StringSplitOptions.TrimEntries|StringSplitOptions.RemoveEmptyEntries);if(relays.Any(u=>!Uri.TryCreate(u,UriKind.Absolute,out var uri)||uri.Scheme!="wss")){MessageBox.Show(d,"Relays must use wss://");return;}try{StartupRegistration.Set(startupOption.IsChecked==true);StartupRegistration.Prompted=true;}catch(Exception error){MessageBox.Show(d,"Could not update Windows startup: "+error.Message);return;}store.State.Notifications=notificationsOption.IsChecked==true;store.State.HideNotificationPreviews=previewsOption.IsChecked==true;store.State.LiveVoice=liveOption.IsChecked==true;store.State.ShareBattery=batteryOption.IsChecked==true;store.State.FileRetentionDays=retention.SelectedItem is ComboBoxItem selected?(int)selected.Tag:0;store.State.Dark=lightOption.IsChecked!=true;ApplyThemeColors();if(!store.State.LiveVoice)_=controller.StopVoiceAutoplay();store.State.Gateway=gatewayOption.IsChecked==true;store.State.Bridge=bridgeOption.IsChecked==true;_=controller.RefreshGateway();store.State.UseTor=torOption.IsChecked==true;store.State.Nickname=n;store.State.Relays=relays.ToList();controller.Mesh.Nickname=n;store.Save();_=controller.Mesh.Announce();_=Guard(async()=>{int removed=await controller.CleanupExpiredMedia();if(removed>0)status.Text=$"Removed {removed} expired local file(s)";});d.Close();}));
         p.Children.Add(Button("view identity",ShowIdentity));p.Children.Add(Button("show verification QR",ShowQr));p.Children.Add(Button("verify peer QR / link",ScanQr));p.Children.Add(new TextBlock{Text="BitChat for Windows · unsigned development build\nSource baseline: 04995f68e470",Foreground=muted,Margin=new Thickness(0,20,0,0)});d.ShowDialog();
     }
     private Window Dialog(string name,string text)=>new(){Owner=this,Title=name,Width=650,Height=350,Background=bg,Foreground=Foreground,WindowStartupLocation=WindowStartupLocation.CenterOwner,Content=new TextBox{Text=text,IsReadOnly=true,TextWrapping=TextWrapping.Wrap,Background=bg,Foreground=Foreground,BorderThickness=new Thickness(0),Margin=new Thickness(20)}};

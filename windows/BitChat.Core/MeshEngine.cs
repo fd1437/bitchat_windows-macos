@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 
 namespace BitChat.Core;
 
-public sealed record MeshPeer(string Id,string Nickname,byte[] NoiseKey,byte[] SigningKey,byte[] Capabilities,long LastSeen,bool Authenticated=false);
+public sealed record MeshPeer(string Id,string Nickname,byte[] NoiseKey,byte[] SigningKey,byte[] Capabilities,long LastSeen,bool Authenticated=false,byte? BatteryPercent=null);
 
 public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
 {
@@ -49,6 +49,7 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
     public event Action<string,byte,byte[]>? TypedPayload;
     // Capability bit 8 = private encrypted media, bit 6 = mesh diagnostics.
     public byte[] Capabilities {get;set;}=[0x40,0x01];
+    public Func<byte?> BatteryPercent {get;set;}=()=>null;
     public MeshEngine(byte[] noiseKey,byte[] signingSeed,string nickname,Func<MeshPacket,Task<int>> send)
     {this.noiseKey=noiseKey.ToArray();this.signingSeed=signingSeed.ToArray();Nickname=nickname;this.send=send;PeerId=Crypto.Hash(Crypto.PublicX(noiseKey))[..8];}
     private MeshPacket Packet(byte type,byte[] payload,string? recipient=null,byte version=1,bool signed=true,ulong? timestamp=null)
@@ -57,7 +58,7 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
         return signed?p with{Signature=Crypto.SignEd(signingSeed,p.SigningBytes())}:p;
     }
     public async Task<int> Announce()
-    {var p=Packet(1,new Announcement(Nickname,Crypto.PublicX(noiseKey),Crypto.PublicEd(signingSeed),Capabilities,BridgeCell,DirectNeighbors()).Encode());await gate.WaitAsync();try{Remember(p);}finally{gate.Release();}return await send(p);}
+    {var p=Packet(1,new Announcement(Nickname,Crypto.PublicX(noiseKey),Crypto.PublicEd(signingSeed),Capabilities,BridgeCell,DirectNeighbors(),BatteryPercent()).Encode());await gate.WaitAsync();try{Remember(p);}finally{gate.Release();}return await send(p);}
     public async Task<int> SendPublic(string text,ulong? timestamp=null)
     {
         if(Bytes.Utf8(text).Length>60000)throw new ArgumentException("Public message exceeds 60000 bytes");
@@ -139,7 +140,7 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
                 if(pinnedKeys.TryGetValue(peerId,out var pinned)&&!pinned.SequenceEqual(ann.SigningKey))return;
                 if(peer!=null&&(!peer.NoiseKey.SequenceEqual(ann.NoiseKey)||!peer.SigningKey.SequenceEqual(ann.SigningKey)))return;
                 if(peers.Count>=512&&!peers.ContainsKey(peerId)){var oldest=peers.Values.Where(x=>!pinnedKeys.ContainsKey(x.Id)).OrderBy(x=>x.LastSeen).FirstOrDefault();if(oldest==null)return;peers.Remove(oldest.Id);}
-                peers[peerId]=peer=new(peerId,ann.Nickname,ann.NoiseKey,ann.SigningKey,ann.Capabilities??[0],Bytes.Now,peer?.Authenticated??false);topology[peerId]=(ann.Neighbors??[]).Select(Bytes.Hex).ToArray();if(ingress!=null&&p.Ttl==7&&!p.IsRsr)IngressPeerValidated?.Invoke(ingress,peerId);PeerChanged?.Invoke(peer);
+                peers[peerId]=peer=new(peerId,ann.Nickname,ann.NoiseKey,ann.SigningKey,ann.Capabilities??[0],Bytes.Now,peer?.Authenticated??false,ann.BatteryPercent);topology[peerId]=(ann.Neighbors??[]).Select(Bytes.Hex).ToArray();if(ingress!=null&&p.Ttl==7&&!p.IsRsr)IngressPeerValidated?.Invoke(ingress,peerId);PeerChanged?.Invoke(peer);
             }
             else if(addressed)
             {
@@ -165,6 +166,7 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
                         if(peer!=null&&p.Signature!=null&&Crypto.VerifyEd(peer.SigningKey,p.SigningBytes(),p.Signature))
                         {var fields=Tlv16.Parse(p.Payload);byte direction=fields.Require(1,1)[0];bool directed=p.Recipient!=null&&p.Recipient.SequenceEqual(PeerId);if((direction is 1 or 3)&&directed||(direction is 2 or 4)&&p.Recipient==null)TypedPayload?.Invoke(peerId,p.Type,p.Payload);}break;
                     case 0x29:if(peer!=null&&p.Signature!=null&&p.Timestamp>=(ulong)(Bytes.Now-30000)&&Crypto.VerifyEd(peer.SigningKey,p.SigningBytes(),p.Signature))TypedPayload?.Invoke(peerId,p.Type,p.Payload);break;
+                    case 0x2A:if(peer!=null&&p.Signature!=null&&p.Timestamp>=(ulong)(Bytes.Now-300000)&&Crypto.VerifyEd(peer.SigningKey,p.SigningBytes(),p.Signature))TypedPayload?.Invoke(peerId,p.Type,p.Payload);break;
                     case 0x21:if(peer!=null)await RespondSync(peerId,p.Payload);break;
                     case 0x10:await Handshake(peerId,p.Payload,p.Ttl==7&&directIngress?ingress:null,p.Ttl==7&&directIngress?ingressEpoch:null);break;
                     case 0x11:

@@ -109,13 +109,14 @@ public sealed record ChatMessage(string Id,string Sender,string Content,long Tim
     }
 }
 
-public sealed record Announcement(string Nickname,byte[] NoiseKey,byte[] SigningKey,byte[]? Capabilities=null,string? BridgeCell=null,byte[][]? Neighbors=null)
+public sealed record Announcement(string Nickname,byte[] NoiseKey,byte[] SigningKey,byte[]? Capabilities=null,string? BridgeCell=null,byte[][]? Neighbors=null,byte? BatteryPercent=null)
 {
     public byte[] Encode()
     {
         var fields=new List<byte[]>{Tlv(1,Bytes.Utf8(Nickname)),Tlv(2,NoiseKey),Tlv(3,SigningKey)};
         if(Neighbors is {Length:>0})fields.Add(Tlv(4,Bytes.Join(Neighbors.Take(10).ToArray())));
         if(Capabilities!=null) fields.Add(Tlv(5,Capabilities)); if(BridgeCell!=null) fields.Add(Tlv(6,Bytes.Utf8(BridgeCell)));
+        if(BatteryPercent is byte battery) { if(battery>100)throw new InvalidDataException("Invalid battery percentage");fields.Add(Tlv(7,[battery])); }
         return Bytes.Join(fields.ToArray());
     }
     public static byte[] Tlv(byte type,byte[] value) {if(value.Length>255)throw new InvalidDataException();return Bytes.Join([type,(byte)value.Length],value);}
@@ -124,6 +125,7 @@ public sealed record Announcement(string Nickname,byte[] NoiseKey,byte[] Signing
         var fields=new Dictionary<byte,byte[]>();var r=new WireReader(data);
         while(r.Remaining>0){var t=r.Byte();if(!fields.TryAdd(t,r.Read(r.Byte())))throw new InvalidDataException("Duplicate TLV");}
         if(!fields.TryGetValue(1,out var name)||!fields.TryGetValue(2,out var noise)||!fields.TryGetValue(3,out var signing)||noise.Length!=32||signing.Length!=32)throw new InvalidDataException("Invalid announcement");
-        return new(Bytes.Text(name),noise,signing,fields.GetValueOrDefault((byte)5),fields.TryGetValue(6,out var cell)?Bytes.Text(cell):null,fields.TryGetValue(4,out var neighbors)&&neighbors.Length%8==0?Enumerable.Range(0,neighbors.Length/8).Select(i=>neighbors.AsSpan(i*8,8).ToArray()).ToArray():null);
+        byte? battery=null;if(fields.TryGetValue(7,out var batteryBytes)){if(batteryBytes.Length!=1||batteryBytes[0]>100)throw new InvalidDataException("Invalid battery percentage");battery=batteryBytes[0];}
+        return new(Bytes.Text(name),noise,signing,fields.GetValueOrDefault((byte)5),fields.TryGetValue(6,out var cell)?Bytes.Text(cell):null,fields.TryGetValue(4,out var neighbors)&&neighbors.Length%8==0?Enumerable.Range(0,neighbors.Length/8).Select(i=>neighbors.AsSpan(i*8,8).ToArray()).ToArray():null,battery);
     }
 }

@@ -83,6 +83,12 @@ jobs:
           $install = Join-Path $env:LOCALAPPDATA 'BitChat-CI-${{ matrix.rid }}'
           $p = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$install") -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "Installer exit code: $($p.ExitCode)" }
+          $state = Join-Path $env:LOCALAPPDATA 'BitChat/state-preservation-test.txt'
+          New-Item -ItemType Directory -Force (Split-Path $state) | Out-Null
+          Set-Content $state 'installer upgrades must preserve app data'
+          $p = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$install") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "In-place upgrade exit code: $($p.ExitCode)" }
+          if (!(Test-Path $state)) { throw 'In-place installer update modified BitChat user data' }
           foreach ($file in @('BitChat.exe', 'media/ffmpeg.exe', 'tor/tor.exe', 'native/${{ matrix.rid }}/bitchat_zlib.dll', 'Uninstall.exe')) {
             if (!(Test-Path (Join-Path $install $file))) { throw "Missing installed file: $file" }
           }

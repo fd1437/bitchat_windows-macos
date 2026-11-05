@@ -37,6 +37,10 @@ foreach(var (file,keyFile,keyProp) in new[]{("LegacyPrivateEnvelope733098bb.json
 }
 var s1=Schnorr.GenerateKey();var s2=Schnorr.GenerateKey();var wrap=PrivateEnvelope.Wrap("Windows ↔ iOS",s1,Bytes.Hex(Schnorr.Public(s2)));
 Check(PrivateEnvelope.Open(wrap,s2).content=="Windows ↔ iOS","Private envelope roundtrip");
+var announce=new Announcement("battery peer",RandomNumberGenerator.GetBytes(32),RandomNumberGenerator.GetBytes(32),BatteryPercent:73);
+Check(Announcement.Decode(announce.Encode()).BatteryPercent==73,"Optional battery TLV round-trips");
+Check(Announcement.Decode(Bytes.Join(announce.Encode(),Announcement.Tlv(0xFE,[1,2,3]))).BatteryPercent==73,"Unknown announce TLVs stay forward-compatible with battery sharing");
+try{_ = new Announcement("invalid",new byte[32],new byte[32],BatteryPercent:101).Encode();Check(false,"Invalid battery percentages rejected");}catch(InvalidDataException){Check(true,"Invalid battery percentages rejected");}
 var cipher1=new NoiseCipher(RandomNumberGenerator.GetBytes(32),true);
 var keyReplay=RandomNumberGenerator.GetBytes(32);using var tx=new NoiseCipher(keyReplay.ToArray(),true);using var rx=new NoiseCipher(keyReplay.ToArray(),true);var encrypted=tx.Encrypt(Bytes.Utf8("hello"));rx.Decrypt(encrypted);
 try{rx.Decrypt(encrypted);Check(false,"Replay rejected");}catch(CryptographicException){Check(true,"Replay rejected");}
@@ -66,11 +70,13 @@ var transit=new Queue<(bool ToB,byte[] Data)>();
 Task<int> Link(bool toB,MeshPacket p){foreach(var fragment in FragmentAssembler.Split(p,128))transit.Enqueue((toB,fragment.Encode()));return Task.FromResult(1);}
 using var alice=new MeshEngine(RandomNumberGenerator.GetBytes(32),RandomNumberGenerator.GetBytes(32),"alice",p=>Link(true,p));
 using var bob=new MeshEngine(RandomNumberGenerator.GetBytes(32),RandomNumberGenerator.GetBytes(32),"bob",p=>Link(false,p));
-var received=new List<ChatMessage>();var statuses=new List<string>();MediaPacket? receivedMedia=null;
-bob.Message+=received.Add;bob.Media+=(_,media,_)=>receivedMedia=media;alice.Receipt+=(_,_,status)=>statuses.Add(status);
+var received=new List<ChatMessage>();var statuses=new List<string>();MediaPacket? receivedMedia=null;byte? peerBattery=null;
+bob.Message+=received.Add;bob.Media+=(_,media,_)=>receivedMedia=media;alice.Receipt+=(_,_,status)=>statuses.Add(status);bob.PeerChanged+=peer=>{if(peer.Id==alice.Id)peerBattery=peer.BatteryPercent;};alice.BatteryPercent=()=>83;
 alice.Status+=s=>Console.WriteLine("Alice: "+s);bob.Status+=s=>Console.WriteLine("Bob: "+s);
 async Task Pump(){int budget=10000;while(transit.Count>0){if(--budget==0)throw new Exception("Mesh relay loop");var m=transit.Dequeue();await(m.ToB?bob:alice).Receive(m.Data);}}
 await alice.Announce();await bob.Announce();await Pump();
+Check(peerBattery==83,"Signed peer announcements expose an opt-in battery percentage");
+alice.BatteryPercent=()=>null;await alice.Announce();await Pump();Check(peerBattery==null,"Turning off battery sharing clears the published percentage");
 await alice.SendPrivate(bob.Id,"hello from Windows", "interop-dm-1");await Pump();
 Check(received.Any(m=>m.Id=="interop-dm-1"&&m.Content=="hello from Windows"),"Two-client Noise session and private-message delivery");
 Check(statuses.Contains("delivered"),"Two-client encrypted delivery receipt");

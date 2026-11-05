@@ -72,7 +72,7 @@ public sealed partial class AppController
         if(maintaining)return;maintaining=true;
         try
         {
-            ExpireVoice();await Mesh.MaintainPrivateMedia();await RefreshCourierBridge();PublishHeldDrops();await DrainGateway();await PublishPresence();await PublishPrekeys();await DepositOutbox();
+            ExpireVoice();if(Bytes.Now-lastMediaRetentionSweep>=15*60*1000){int expired=await CleanupExpiredMedia();if(expired>0)Status?.Invoke($"Removed {expired} expired local file(s)");}await Mesh.MaintainPrivateMedia();await RefreshCourierBridge();PublishHeldDrops();await DrainGateway();await PublishPresence();await PublishPrekeys();await DepositOutbox();
             foreach(var (id,carried) in Store.State.CourierSpool.ToArray())
             {
                 if(!carried.Envelope.Valid){Store.State.CourierSpool.Remove(id);continue;}if(Bytes.Now-carried.LastTransfer<30000)continue;

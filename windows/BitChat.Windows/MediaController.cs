@@ -7,6 +7,7 @@ namespace BitChat.Windows;
 public sealed partial class AppController
 {
     private readonly PrivateMediaLedger mediaLedger;
+    private long lastMediaRetentionSweep;
     public Func<string,Task<bool>>? ConfirmLegacyMedia{get;set;}
     private static byte[] ProtectMediaDecision(byte[] data)=>ProtectedData.Protect(data,null,DataProtectionScope.CurrentUser);
     private static byte[] UnprotectMediaDecision(byte[] data)=>ProtectedData.Unprotect(data,null,DataProtectionScope.CurrentUser);
@@ -128,5 +129,32 @@ public sealed partial class AppController
             try{Store.RemoveMedia(message.Attachment!);}catch(Exception e){Status?.Invoke("Media cleanup: "+e.Message);}
         }
         TimelineChanged?.Invoke();
+    }
+
+    public async Task<int> CleanupExpiredMedia()
+    {
+        lastMediaRetentionSweep=Bytes.Now;
+        int days=Store.State.FileRetentionDays;if(days<=0)return 0;
+        long cutoff=DateTimeOffset.UtcNow.AddDays(-Math.Clamp(days,1,36500)).ToUnixTimeMilliseconds();
+        return await DeleteLocalAttachments(Store.State.Messages.Where(m=>m.Attachment!=null&&m.Timestamp<cutoff).ToArray());
+    }
+
+    public async Task<int> DeleteLocalAttachments(IEnumerable<StoredMessage> selected)
+    {
+        var messages=selected.Where(m=>m.Attachment!=null&&!m.LocalAttachmentDeleted)
+            .Select(m=>Store.State.Messages.FirstOrDefault(current=>current.Conversation==m.Conversation&&current.Id==m.Id&&current.Attachment==m.Attachment))
+            .Where(m=>m!=null).Cast<StoredMessage>().DistinctBy(m=>m.Conversation+"\0"+m.Id).ToArray();
+        if(messages.Length==0)return 0;
+        var incoming=messages.Where(m=>!m.Own&&PrivateMediaIdentity.IsStable(m.Id)).GroupBy(m=>m.Id).ToDictionary(g=>g.Key,g=>(string?)g.First().Attachment);
+        if(incoming.Count>0&&!mediaLedger.Delete(incoming))throw new IOException("The media deletion record could not be saved; files were kept");
+        await Mesh.ForgetPrivateMedia(messages.Where(m=>m.Own).Select(m=>m.Id));
+        var replacements=messages.ToDictionary(m=>m,m=>m with{Attachment=null,Mime=null,LocalAttachmentDeleted=true});
+        foreach(var (old,replacement) in replacements)
+        {int index=Store.State.Messages.FindIndex(m=>m.Conversation==old.Conversation&&m.Id==old.Id);if(index>=0)Store.State.Messages[index]=replacement;}
+        try{Store.Save();}
+        catch{foreach(var old in messages){int index=Store.State.Messages.FindIndex(m=>m.Conversation==old.Conversation&&m.Id==old.Id);if(index>=0)Store.State.Messages[index]=old;}throw;}
+        foreach(var message in messages.Where(m=>!incoming.ContainsKey(m.Id)))
+            try{Store.RemoveMedia(message.Attachment!);}catch(Exception e){Status?.Invoke("A deleted attachment could not be removed: "+e.Message);}
+        TimelineChanged?.Invoke();return messages.Length;
     }
 }

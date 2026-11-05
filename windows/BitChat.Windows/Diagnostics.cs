@@ -18,6 +18,24 @@ public static class Diagnostics
         reportPath=Path.GetFullPath(reportPath);Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);var checks=new List<Result>();
         async Task Check(string name,Func<Task<object>> test)
         {try{checks.Add(new(name,true,(await test()).ToString()??""));}catch(Exception e){checks.Add(new(name,false,e.Message));}}
+        await Check("GitHub release version parsing",()=>
+        {
+            if(ReleaseUpdater.ParseTagVersion("v1.2.3-windows-preview")!=new Version(1,2,3,0)||ReleaseUpdater.ParseTagVersion("not-a-version")!=null)throw new InvalidDataException("Release tags were not parsed safely");
+            return Task.FromResult<object>("semantic versions are compared independently of preview suffixes");
+        });
+        await Check("Configurable local file retention",async()=>
+        {
+            string temporary=Path.Combine(Path.GetDirectoryName(reportPath)!,"bitchat-retention-diagnostic-"+Guid.NewGuid().ToString("N"));string? prior=StateStore.OverrideRoot;StateStore.OverrideRoot=temporary;
+            try
+            {
+                var store=new StateStore();var media=new MediaPacket("expired.png","image/png",[1,2,3]);string path=store.SaveMedia(media);
+                store.State.FileRetentionDays=1;store.State.Messages.Add(new("mesh","retention-diagnostic","peer","expired.png",DateTimeOffset.UtcNow.AddDays(-2).ToUnixTimeMilliseconds(),Attachment:path,Mime:media.Mime));store.Save();
+                await using var controller=new AppController(store);int removed=await controller.CleanupExpiredMedia();
+                if(removed!=1||File.Exists(path)||store.State.Messages[0].Attachment!=null||!store.State.Messages[0].LocalAttachmentDeleted)throw new IOException("Expired media was not removed locally");
+                return "expired attachment file removed while retaining its message row";
+            }
+            finally{StateStore.OverrideRoot=prior;if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
+        });
         await Check("Windows DPAPI",()=>{var clear=RandomNumberGenerator.GetBytes(32);var encrypted=ProtectedData.Protect(clear,null,DataProtectionScope.CurrentUser);if(!ProtectedData.Unprotect(encrypted,null,DataProtectionScope.CurrentUser).SequenceEqual(clear))throw new CryptographicException("DPAPI roundtrip failed");return Task.FromResult<object>("per-user encryption works");});
         await Check("Durable private media (DPAPI)",()=>
         {

@@ -45,7 +45,7 @@ public sealed partial class MainWindow:Window
     private readonly Dictionary<string,TextBlock> receiptLabels=[];
     private string conversation="mesh";
     private readonly SolidColorBrush bg=new(Color.FromRgb(13,17,20)),panel=new(Color.FromRgb(20,26,30)),green=new(Color.FromRgb(99,230,153)),muted=new(Color.FromRgb(151,166,175));
-    private Button? filesButton,updateButton;
+    private Button? filesButton,updateButton,maximizeButton;
     private readonly List<Button> chromeButtons=[];
     private readonly TextBlock typingLabel=new(){FontSize=11};
     private readonly Dictionary<string,long> typingPeers=[];
@@ -63,11 +63,13 @@ public sealed partial class MainWindow:Window
         tray.Visible=!diagnostics;
         this.store=store;installLatestOnLaunch=installLatest;controller=new(store);Title="bitchat · Windows";Width=1120;Height=780;MinWidth=780;MinHeight=520;WindowStyle=WindowStyle.None;ResizeMode=ResizeMode.CanResize;Background=bg;FontFamily=new FontFamily("Cascadia Mono, Consolas");FontSize=13;ApplyThemeColors();
         WindowChrome.SetWindowChrome(this,new WindowChrome{CaptionHeight=38,ResizeBorderThickness=new Thickness(6),GlassFrameThickness=new Thickness(0),UseAeroCaptionButtons=false});
+        SourceInitialized+=(_,_)=>WindowChromeWorkAreaHook.Attach(this);
         var root=new Grid{Background=bg};root.RowDefinitions.Add(new(){Height=new GridLength(38)});root.RowDefinitions.Add(new(){Height=new GridLength(1,GridUnitType.Star)});root.ColumnDefinitions.Add(new(){Width=new GridLength(240)});root.ColumnDefinitions.Add(new(){Width=new GridLength(1,GridUnitType.Star)});Content=root;
         var titleBar=new DockPanel{Background=panel,LastChildFill=true};Grid.SetRow(titleBar,0);Grid.SetColumnSpan(titleBar,2);root.Children.Add(titleBar);
         var windowButtons=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};
-        Button ChromeButton(string label,Action click){var b=new Button{Content=label,Width=44,Height=34,Background=Brushes.Transparent,Foreground=Foreground,BorderThickness=new Thickness(0),FontSize=15,Cursor=Cursors.Hand};b.Click+=(_,_)=>click();windowButtons.Children.Add(b);chromeButtons.Add(b);return b;}
-        ChromeButton("—",()=>WindowState=WindowState.Minimized);ChromeButton("□",()=>WindowState=WindowState==WindowState.Maximized?WindowState.Normal:WindowState.Maximized);ChromeButton("×",()=>Hide());DockPanel.SetDock(windowButtons,Dock.Right);titleBar.Children.Add(windowButtons);
+        Button ChromeButton(string label,Action click){var b=new Button{Content=label,Width=44,Height=34,Background=Brushes.Transparent,Foreground=Foreground,BorderThickness=new Thickness(0),FontSize=15,Cursor=Cursors.Hand};WindowChrome.SetIsHitTestVisibleInChrome(b,true);b.Click+=(_,_)=>click();windowButtons.Children.Add(b);chromeButtons.Add(b);return b;}
+        ChromeButton("—",()=>WindowState=WindowState.Minimized);maximizeButton=ChromeButton("□",()=>WindowState=WindowState==WindowState.Maximized?WindowState.Normal:WindowState.Maximized);ChromeButton("×",()=>Hide());
+        StateChanged+=(_,_)=>{if(maximizeButton!=null)maximizeButton.Content=WindowState==WindowState.Maximized?"❐":"□";};DockPanel.SetDock(windowButtons,Dock.Right);titleBar.Children.Add(windowButtons);
         titleBar.Children.Add(new TextBlock{Text="  ◉  bitchat  ·  Windows",Foreground=green,FontWeight=FontWeights.SemiBold,VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(8,0,0,0)});
         var sidebar=new DockPanel{Background=panel,Margin=new Thickness(0,0,1,0)};Grid.SetRow(sidebar,1);root.Children.Add(sidebar);
         var brand=new Button{Content="bitchat",Foreground=green,Background=Brushes.Transparent,BorderThickness=new Thickness(0),FontSize=28,FontWeight=FontWeights.Bold,HorizontalContentAlignment=HorizontalAlignment.Left,Padding=new Thickness(20)};
@@ -109,6 +111,35 @@ public sealed partial class MainWindow:Window
         Closing+=(_,e)=>{if(closing)return;e.Cancel=true;Hide();};
     }
     public void RestoreFromTray(){Show();WindowState=WindowState.Normal;Activate();}
+    internal bool ShouldShowMessageNotification(StoredMessage message)
+        =>!message.Own&&store.State.Notifications&&(!IsVisible||!IsActive||WindowState==WindowState.Minimized||message.Conversation!=conversation);
+    internal void VerifyNotificationVisibilityRouting()
+    {
+        store.State.Notifications=true;
+        var message=new StoredMessage(conversation,"notification-diagnostic","peer","test",Bytes.Now);
+        if(IsActive&&ShouldShowMessageNotification(message))throw new InvalidOperationException("An active conversation should not create a notification");
+        Hide();
+        if(!ShouldShowMessageNotification(message))throw new InvalidOperationException("A hidden BitChat window must still notify about a new message");
+        RestoreFromTray();
+    }
+    internal void VerifyWindowControls()
+    {
+        if(chromeButtons.Count!=3||chromeButtons.Any(button=>!WindowChrome.GetIsHitTestVisibleInChrome(button)))
+            throw new InvalidOperationException("Window controls are not clickable in the title bar");
+        chromeButtons[0].RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+        if(WindowState!=WindowState.Minimized)throw new InvalidOperationException("Minimize button did not minimize the window");
+        WindowState=WindowState.Normal;
+        maximizeButton!.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+        UpdateLayout();
+        if(WindowState!=WindowState.Maximized)throw new InvalidOperationException("Maximize button did not maximize the window");
+        if(!WindowChromeWorkAreaHook.IsWithinMonitorWorkArea(new System.Windows.Interop.WindowInteropHelper(this).Handle))
+            throw new InvalidOperationException("Maximized window extends beyond the monitor work area");
+        maximizeButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+        if(WindowState!=WindowState.Normal)throw new InvalidOperationException("Restore button did not restore the window");
+        chromeButtons[2].RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+        if(IsVisible)throw new InvalidOperationException("Close button did not hide BitChat to the notification area");
+        RestoreFromTray();
+    }
     private async Task Quit()
     {
         if(closing)return;closing=true;
@@ -138,7 +169,7 @@ public sealed partial class MainWindow:Window
         controller.ConfirmLegacyMedia=peer=>Task.FromResult(MessageBox.Show(this,"This contact ("+peer+") has not proved encrypted attachment support. Send this attachment without end-to-end encryption? Nearby relays may read it. This approval applies only to this send.","Legacy attachment",MessageBoxButton.YesNo,MessageBoxImage.Warning)==MessageBoxResult.Yes);
         controller.Status+=s=>Ui(()=>{status.Text=s;network.Text=$"BLE {controller.Bluetooth.Connections} · relays {controller.Relays.Connected}";});
         controller.PeersChanged+=()=>Ui(()=>{RefreshChannels();network.Text=$"BLE {controller.Bluetooth.Connections} · relays {controller.Relays.Connected} · nearby {controller.NearbyPresence}";});controller.TimelineChanged+=()=>Ui(()=>Select(conversation));
-        controller.Message+=m=>Ui(()=>{if(!m.Own&&store.State.Notifications&&(!IsActive||m.Conversation!=conversation))ShowMessageToast(m);if(m.Conversation==conversation){Append(m);scroll.ScrollToEnd();if(CanMarkRead(m)&&!m.Own&&m.Conversation.StartsWith("mesh:"))_=controller.MarkMeshRead(m);if(IsActive&&!m.Own&&m.Conversation.StartsWith("nostr:"))_=controller.MarkNostrRead(m.Conversation[6..],m.Id); }else if(!m.Own)status.Text=$"New message from {m.Sender}";RefreshChannels();});
+        controller.Message+=m=>Ui(()=>{if(ShouldShowMessageNotification(m)){try{ShowMessageToast(m);}catch(Exception error){ShowFallbackNotification(m,error);}}if(m.Conversation==conversation){Append(m);scroll.ScrollToEnd();if(CanMarkRead(m)&&!m.Own&&m.Conversation.StartsWith("mesh:"))_=controller.MarkMeshRead(m);if(IsActive&&!m.Own&&m.Conversation.StartsWith("nostr:"))_=controller.MarkNostrRead(m.Conversation[6..],m.Id); }else if(!m.Own)status.Text=$"New message from {m.Sender}";RefreshChannels();});
         controller.TypingChanged+=(peer,isTyping)=>Ui(()=>{if(isTyping)typingPeers[peer]=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();else typingPeers.Remove(peer);RefreshTypingLabel();});
         controller.Receipt+=(id,value)=>Ui(()=>{if(receiptLabels.TryGetValue(id,out var label))label.Text=value;});
     }

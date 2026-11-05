@@ -25,7 +25,9 @@ On first normal launch, BitChat asks once whether to start at Windows sign-in.
 The setting can be changed later in Settings. Automatic launch starts in the
 notification area. Closing the window keeps networking active; use Open BitChat
 or Quit BitChat in its tray menu. Reopening the executable activates the existing
-instance. The uninstaller removes the current-user startup registration.
+instance. The uninstaller removes the current-user startup registration. The
+custom title-bar controls remain clickable, and maximized windows use the active
+monitor's work area so the taskbar remains accessible.
 
 When an installation already exists, the installer offers repair/update, a
 latest-release check, or uninstall. The app checks GitHub releases every ten
@@ -58,6 +60,9 @@ text and image thumbnails in an on-screen notification with an inline reply box;
 the existing hide-preview setting remains available. Nearby users' battery
 percentages are shown only when they publish them, and sharing your own level is
 off by default. The custom title bar follows the selected dark or light theme.
+Notifications are emitted when the app is hidden or minimized, or another
+conversation is selected; their position follows the app's monitor and avoids
+the taskbar. A system-tray balloon is used if the rich in-app notification fails.
 Typing indicators and emoji reaction synchronization are currently available to
 other Windows port clients; iOS has no matching typing/reaction wire event.
 

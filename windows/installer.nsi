@@ -11,7 +11,7 @@ Unicode True
   !define OUTPUT "BitChat-Setup-unsigned.exe"
 !endif
 !ifndef VERSION
-  !define VERSION "0.1.6"
+  !define VERSION "0.1.7"
 !endif
 Var ExistingInstall
 Var ExistingAction

@@ -116,7 +116,7 @@ public static class Diagnostics
         try
         {
             window=new MainWindow(new StateStore(),true);
-            window.Show();window.Close();
+            window.Show();window.VerifyNotificationVisibilityRouting();window.VerifyWindowControls();window.Close();
             if(window.IsVisible)throw new InvalidOperationException("Closing must hide the window");
             window.RestoreFromTray();
             if(!window.IsVisible)throw new InvalidOperationException("Tray restore must reopen the same window");

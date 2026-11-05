@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Input;
+using System.Windows.Interop;
 using BitChat.Core;
 
 namespace BitChat.Windows;
@@ -83,8 +84,33 @@ public sealed partial class MainWindow
         send.Click+=async(_,_)=>{string text=reply.Text.Trim();if(text.Length==0)return;send.IsEnabled=false;try{await controller.Send(message.Conversation,text);toast.Close();}catch(Exception e){reply.ToolTip=e.Message;send.IsEnabled=true;}};
         reply.PreviewKeyDown+=(_,e)=>{if(e.Key==Key.Enter){e.Handled=true;send.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));}};
         toast.Closed+=(_,_)=>toastWindows.Remove(toast);toastWindows.Add(toast);
-        var screen=System.Windows.Forms.Screen.PrimaryScreen;
-        if(screen!=null){var area=screen.WorkingArea;toast.Left=area.Right-toast.Width-14;toast.Top=area.Bottom-toast.Height-14-(toastWindows.Count-1)*(toast.Height+8);}
-        toast.Show();var timer=new System.Windows.Threading.DispatcherTimer{Interval=TimeSpan.FromSeconds(15)};timer.Tick+=(_,_)=>{timer.Stop();toast.Close();};toast.Closed+=(_,_)=>timer.Stop();timer.Start();
+        var handle=new WindowInteropHelper(this).Handle;
+        var screen=handle==IntPtr.Zero?System.Windows.Forms.Screen.PrimaryScreen:System.Windows.Forms.Screen.FromHandle(handle);
+        if(screen!=null)
+        {
+            var pixels=screen.WorkingArea;
+            var deviceRect=new Rect(pixels.Left,pixels.Top,pixels.Width,pixels.Height);
+            Matrix fromDevice=PresentationSource.FromVisual(this)?.CompositionTarget?.TransformFromDevice??Matrix.Identity;
+            var area=new Rect(fromDevice.Transform(new Point(deviceRect.Left,deviceRect.Top)),fromDevice.Transform(new Point(deviceRect.Right,deviceRect.Bottom)));
+            toast.Left=Math.Max(area.Left+8,area.Right-toast.Width-14);
+            double maxTop=Math.Max(area.Top+8,area.Bottom-toast.Height-8);
+            toast.Top=Math.Clamp(area.Bottom-toast.Height-14-(toastWindows.Count-1)*(toast.Height+8),area.Top+8,maxTop);
+        }
+        toast.Show();
+        if(!toast.IsVisible){toast.Close();ShowFallbackNotification(message,new InvalidOperationException("The message alert window could not be displayed"));return;}
+        var timer=new System.Windows.Threading.DispatcherTimer{Interval=TimeSpan.FromSeconds(15)};timer.Tick+=(_,_)=>{timer.Stop();toast.Close();};toast.Closed+=(_,_)=>timer.Stop();timer.Start();
+    }
+
+    private void ShowFallbackNotification(StoredMessage message,Exception error)
+    {
+        status.Text="Message alert fallback: "+error.Message;
+        try
+        {
+            tray.BalloonTipTitle=store.State.HideNotificationPreviews?"BitChat":"BitChat · "+message.Sender;
+            string body=store.State.HideNotificationPreviews?"New message":message.Text;
+            tray.BalloonTipText=body.Length>240?body[..240]:body;
+            tray.ShowBalloonTip(6000);
+        }
+        catch{}
     }
 }

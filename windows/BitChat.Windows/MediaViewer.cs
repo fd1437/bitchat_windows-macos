@@ -10,7 +10,7 @@ namespace BitChat.Windows;
 
 public sealed partial class MainWindow
 {
-    private void OpenMediaViewer(StoredMessage selected)
+    private void OpenMediaViewer(StoredMessage selected,bool verify=false)
     {
         var files=store.State.Messages.Where(message=>message.Conversation==selected.Conversation&&message.Attachment!=null&&!message.LocalAttachmentDeleted).OrderBy(message=>message.Timestamp).ToArray();
         if(files.Length==0)return;
@@ -57,6 +57,27 @@ public sealed partial class MainWindow
         toolbar.Children.Add(Button("← Previous",()=>Move(-1)));toolbar.Children.Add(Button("Next →",()=>Move(1)));toolbar.Children.Add(Button("−",()=>ApplyZoom(zoom/1.25)));toolbar.Children.Add(zoomLabel);toolbar.Children.Add(Button("＋",()=>ApplyZoom(zoom*1.25)));toolbar.Children.Add(Button("Fit",Fit));toolbar.Children.Add(Button("Copy",Copy));toolbar.Children.Add(Button("Save as…",()=>ExportAttachment(files[index])));toolbar.Children.Add(Button("Close",viewer.Close));
         viewer.PreviewKeyDown+=(_,e)=>{if(e.Key==Key.Left){Move(-1);e.Handled=true;}else if(e.Key==Key.Right){Move(1);e.Handled=true;}else if(e.Key==Key.Escape)viewer.Close();else if(e.Key==Key.C&&(Keyboard.Modifiers&ModifierKeys.Control)!=0){Copy();e.Handled=true;}else if(e.Key is Key.Add or Key.OemPlus)ApplyZoom(zoom*1.25);else if(e.Key is Key.Subtract or Key.OemMinus)ApplyZoom(zoom/1.25);};
         image.PreviewMouseWheel+=(_,e)=>{if((Keyboard.Modifiers&ModifierKeys.Control)!=0){ApplyZoom(zoom*(e.Delta>0?1.15:1/1.15));e.Handled=true;}};
-        viewer.Loaded+=(_,_)=>Load();viewer.SizeChanged+=(_,_)=>{if(bitmap!=null&&zoom<=1)Fit();};viewer.ShowDialog();
+        viewer.Loaded+=(_,_)=>Load();viewer.SizeChanged+=(_,_)=>{if(bitmap!=null&&zoom<=1)Fit();};
+        if(verify)
+        {
+            try
+            {
+                viewer.Show();if(bitmap==null)throw new InvalidOperationException("Viewer did not decode the selected image");ApplyZoom(2);if(image.Width!=bitmap.PixelWidth*2)throw new InvalidOperationException("Viewer zoom did not change image size");
+                int first=index;Move(1);if(index==first||bitmap==null)throw new InvalidOperationException("Viewer could not navigate to the next image");
+            }
+            finally{viewer.Close();}
+            return;
+        }
+        viewer.ShowDialog();
     }
+    internal void VerifyMediaViewer()
+    {
+        byte[] png=Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGOwWZCHFTEMLQkAMChSgdtUpbYAAAAASUVORK5CYII=");
+        var first=new StoredMessage("viewer-test","viewer-first","diagnostic","first.png",DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),Attachment:store.SaveMedia(new("first.png","image/png",png)),Mime:"image/png");
+        var second=new StoredMessage("viewer-test","viewer-second","diagnostic","second.png",first.Timestamp+1,Attachment:store.SaveMedia(new("second.png","image/png",png)),Mime:"image/png");
+        store.State.Messages.Add(first);store.State.Messages.Add(second);
+        try{OpenMediaViewer(first,true);}
+        finally{store.State.Messages.Remove(first);store.State.Messages.Remove(second);store.RemoveMedia(first.Attachment!);store.RemoveMedia(second.Attachment!);}
+    }
+
 }

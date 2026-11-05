@@ -172,7 +172,8 @@ public sealed partial class MainWindow:Window
         if(Application.Current!=null)
         {
             Application.Current.Resources[typeof(Button)]=Resources[typeof(Button)];
-            var textStyle=new Style(typeof(TextBox));textStyle.Setters.Add(new Setter(Control.BackgroundProperty,panel));textStyle.Setters.Add(new Setter(Control.ForegroundProperty,Foreground));textStyle.Setters.Add(new Setter(TextBox.CaretBrushProperty,green));textStyle.Setters.Add(new Setter(Control.PaddingProperty,new Thickness(10,8,10,8)));textStyle.Setters.Add(new Setter(Control.BorderBrushProperty,muted));textStyle.Setters.Add(new Setter(Control.BorderThicknessProperty,new Thickness(.5)));Application.Current.Resources[typeof(TextBox)]=textStyle;
+            Application.Current.Resources["BitChat.Panel"]=panel;Application.Current.Resources["BitChat.Foreground"]=Foreground;Application.Current.Resources["BitChat.Accent"]=green;Application.Current.Resources["BitChat.Muted"]=muted;
+            var textStyle=new Style(typeof(TextBox));textStyle.Setters.Add(new Setter(Control.BackgroundProperty,new DynamicResourceExtension("BitChat.Panel")));textStyle.Setters.Add(new Setter(Control.ForegroundProperty,new DynamicResourceExtension("BitChat.Foreground")));textStyle.Setters.Add(new Setter(TextBox.CaretBrushProperty,new DynamicResourceExtension("BitChat.Accent")));textStyle.Setters.Add(new Setter(Control.PaddingProperty,new Thickness(10,8,10,8)));textStyle.Setters.Add(new Setter(Control.BorderBrushProperty,new DynamicResourceExtension("BitChat.Muted")));textStyle.Setters.Add(new Setter(Control.BorderThicknessProperty,new Thickness(.5)));Application.Current.Resources[typeof(TextBox)]=textStyle;
         }
         if(Content is Grid layout&&layout.ColumnDefinitions.Count>0)layout.ColumnDefinitions[0].Width=new GridLength(hack?240:276);
         input.Foreground=Foreground;foreach(var button in chromeButtons)button.Foreground=Foreground;
@@ -245,7 +246,7 @@ public sealed partial class MainWindow:Window
         var choices=new StackPanel{Orientation=Orientation.Horizontal};
         foreach(var group in store.State.Reactions.Where(r=>r.Conversation==m.Conversation&&r.MessageId==m.Id).GroupBy(r=>r.Emoji).OrderBy(g=>Array.IndexOf(ReactionOptions,g.Key)))
             choices.Children.Add(Button(group.Key+" "+group.Count(),async()=>await Guard(()=>controller.ToggleReaction(m,group.Key))));
-        var picker=Button("react…",()=>{});var menu=new ContextMenu();foreach(string emoji in ReactionOptions){var item=new MenuItem{Header=emoji};item.Click+=async(_,_)=>await Guard(()=>controller.ToggleReaction(m,emoji));menu.Items.Add(item);}picker.ContextMenu=menu;picker.Click+=(_,_)=>menu.IsOpen=true;choices.Children.Add(picker);block.Children.Add(choices);
+        var picker=Button("react…",()=>{});var menu=new ContextMenu();foreach(string emoji in ReactionOptions){var item=new MenuItem{Header=emoji};item.Click+=async(_,_)=>await Guard(()=>controller.ToggleReaction(m,emoji));menu.Items.Add(item);}picker.ContextMenu=menu;picker.Click+=(_,_)=>menu.IsOpen=true;choices.Children.Add(picker);foreach(Button reaction in choices.Children){reaction.MinHeight=24;reaction.Height=26;reaction.FontSize=11;reaction.Padding=new Thickness(8,3,8,3);}block.Children.Add(choices);
         if(store.State.HackMode)messages.Children.Add(block);
         else
         {

@@ -121,7 +121,7 @@ public static class Diagnostics
             if(window.IsVisible)throw new InvalidOperationException("Closing must hide the window");
             window.RestoreFromTray();
             if(!window.IsVisible)throw new InvalidOperationException("Tray restore must reopen the same window");
-            window.VerifyComposerKeyHandling();window.VerifyImageReveal();window.VerifyDraftStaging();
+            window.VerifyComposerKeyHandling();window.VerifyImageReveal();window.VerifyDraftStaging();window.VerifyMediaViewer();
             string nativeXml=NativeNotifications.BuildContent("mesh","Alice","Photo",new Uri("file:///C:/preview.png"),false).GetToastContent().GetContent();
             if(!nativeXml.Contains("<input")||!nativeXml.Contains("<image")||!nativeXml.Contains("reply"))throw new InvalidDataException("Native notification is missing its image or reply input");
             window.PrepareVisualDiagnostics();

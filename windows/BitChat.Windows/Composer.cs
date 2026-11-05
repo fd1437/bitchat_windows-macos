@@ -29,7 +29,7 @@ public sealed partial class MainWindow
         DataObject.AddPastingHandler(input,(_,e)=>{if(e.DataObject.GetDataPresent(DataFormats.FileDrop)||e.DataObject.GetDataPresent(DataFormats.Bitmap)){e.CancelCommand();TryPasteAttachments();}});
         input.AllowDrop=true;input.PreviewDragOver+=(_,e)=>{if(e.Data.GetDataPresent(DataFormats.FileDrop)){e.Effects=DragDropEffects.Copy;e.Handled=true;}};
         input.PreviewDrop+=(_,e)=>{if(e.Data.GetData(DataFormats.FileDrop) is string[] paths){e.Handled=true;_=Guard(()=>StageFiles(paths));}};
-        content.Children.Add(input);
+        var textArea=new Grid();textArea.Children.Add(input);var placeholder=new TextBlock{Text="Write a message, paste files, or record a voice note…",Foreground=muted,Margin=new Thickness(14,13,14,0),IsHitTestVisible=false};textArea.Children.Add(placeholder);input.TextChanged+=(_,_)=>placeholder.Visibility=input.Text.Length==0?Visibility.Visible:Visibility.Collapsed;content.Children.Add(textArea);
         var toolbar=new DockPanel{Margin=new Thickness(6,0,6,6)};
         var send=Button("Send  ↵",async()=>await Send());send.MinWidth=92;send.Background=green;send.Foreground=Brushes.White;DockPanel.SetDock(send,Dock.Right);toolbar.Children.Add(send);
         var tools=new StackPanel{Orientation=Orientation.Horizontal};

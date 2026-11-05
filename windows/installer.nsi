@@ -4,6 +4,7 @@ Unicode True
 !include "x64.nsh"
 !include "WinVer.nsh"
 !include "nsDialogs.nsh"
+!include "WordFunc.nsh"
 !ifndef PAYLOAD
   !error "Define PAYLOAD with the publish folder containing win-x64 and win-arm64"
 !endif
@@ -28,7 +29,8 @@ SetCompressor /SOLID lzma
 SetCompressorDictSize 64
 BrandingText "BitChat · Windows · unsigned"
 !define MUI_ABORTWARNING
-!define MUI_FINISHPAGE_RUN "$INSTDIR\BitChat.exe"
+!define MUI_FINISHPAGE_RUN
+!define MUI_FINISHPAGE_RUN_FUNCTION RunBitChat
 !define MUI_FINISHPAGE_RUN_TEXT "Launch BitChat"
 !insertmacro MUI_PAGE_WELCOME
 Page custom ExistingInstallPage ExistingInstallLeave
@@ -81,8 +83,16 @@ Function ExistingInstallLeave
   ${If} $0 == ${BST_CHECKED}
     StrCpy $ExistingAction "latest"
     StrCpy $InstallLatest "1"
-    ExecShell "open" "$INSTDIR\BitChat.exe" "--install-latest"
-    Quit
+    ; Older updater builds hold the installer open during rename. Repair them
+    ; with this bundled build before asking the newly installed app to check.
+    ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\BitChat" "DisplayVersion"
+    ${If} $0 != ""
+      ${VersionCompare} $0 "0.1.8" $1
+      ${If} $1 != 2
+        ExecShell "open" "$INSTDIR\BitChat.exe" "--install-latest"
+        Quit
+      ${EndIf}
+    ${EndIf}
   ${Else}
     ${NSD_GetState} $ActionUninstall $0
     ${If} $0 == ${BST_CHECKED}
@@ -100,9 +110,11 @@ Function ExistingInstallLeave
     Abort
   ${EndIf}
 FunctionEnd
-Function .onInstSuccess
+Function RunBitChat
   ${If} $InstallLatest == "1"
     ExecShell "open" "$INSTDIR\BitChat.exe" "--install-latest"
+  ${Else}
+    ExecShell "open" "$INSTDIR\BitChat.exe"
   ${EndIf}
 FunctionEnd
 Section "BitChat" SecMain

@@ -70,7 +70,9 @@ the update download percentage and progress bar before checksum verification.
 
 The old installer's "latest version" option could first install its bundled
 version and then install a newer release. It now starts the existing app's update
-check directly, avoiding that double installation. The x64 and ARM64 branches
+check directly when the installed updater is at least 0.1.8. Older updater
+builds are first repaired with the bundled version to fix their locked-file
+rename bug. The finish page launches the application once. The x64 and ARM64 branches
 only extract the matching executable; .NET may separately extract its embedded
 runtime when the application starts.
 

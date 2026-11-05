@@ -18,9 +18,22 @@ enum AppTheme: String, CaseIterable, Identifiable {
     /// UserDefaults key backing the theme selection.
     static let storageKey = "appTheme"
 
+    static var platformDefault: AppTheme {
+        #if os(macOS)
+        .liquidGlass
+        #else
+        .matrix
+        #endif
+    }
+
     var displayNameKey: LocalizedStringKey {
         switch self {
-        case .matrix: return "app_info.appearance.matrix"
+        case .matrix:
+            #if os(macOS)
+            return "Hack mode"
+            #else
+            return "app_info.appearance.matrix"
+            #endif
         case .liquidGlass: return "app_info.appearance.liquid_glass"
         }
     }
@@ -127,7 +140,7 @@ struct ThemePalette {
 }
 
 private struct AppThemeKey: EnvironmentKey {
-    static let defaultValue: AppTheme = .matrix
+    static let defaultValue: AppTheme = .platformDefault
 }
 
 extension EnvironmentValues {

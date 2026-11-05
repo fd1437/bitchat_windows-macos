@@ -15,7 +15,7 @@ struct BitchatApp: App {
     static let groupID = "group.\(bundleID)"
 
     @StateObject private var runtime: AppRuntime
-    @AppStorage(AppTheme.storageKey) private var appThemeRawValue = AppTheme.matrix.rawValue
+    @AppStorage(AppTheme.storageKey) private var appThemeRawValue = AppTheme.platformDefault.rawValue
     #if os(iOS)
     @Environment(\.scenePhase) var scenePhase
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -31,7 +31,7 @@ struct BitchatApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environment(\.appTheme, AppTheme(rawValue: appThemeRawValue) ?? .matrix)
+                .environment(\.appTheme, AppTheme(rawValue: appThemeRawValue) ?? .platformDefault)
                 .environmentObject(runtime.publicChatModel)
                 .environmentObject(runtime.privateInboxModel)
                 .environmentObject(runtime.privateConversationModel)
@@ -97,7 +97,15 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag, let window = sender.windows.first(where: { $0.canBecomeMain && !($0 is NSPanel) }) {
+            window.makeKeyAndOrderFront(nil)
+            return false
+        }
+        return true
     }
 }
 #endif

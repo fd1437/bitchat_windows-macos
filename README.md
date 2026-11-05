@@ -103,6 +103,12 @@ Private messages use **intelligent transport selection**:
 
 For detailed protocol documentation, see the [Technical Whitepaper](WHITEPAPER.md).
 
+## Windows development port
+
+An unsigned, offline Windows installer and the native Windows source are being
+added in [`windows/`](windows/README-WINDOWS.md). The port is under validation;
+see its README for implemented paths, tests and remaining iOS parity work.
+
 ## Setup
 
 ### Option 1: Using Xcode

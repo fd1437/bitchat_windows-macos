@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType><TargetFramework>net8.0-windows10.0.19041.0</TargetFramework><UseWPF>true</UseWPF><UseWindowsForms>true</UseWindowsForms><ApplicationIcon>Assets/BitChat.ico</ApplicationIcon><EnableWindowsTargeting>true</EnableWindowsTargeting><ImplicitUsings>disable</ImplicitUsings><Nullable>enable</Nullable><LangVersion>latest</LangVersion>
+    <AssemblyName>BitChat</AssemblyName><Product>BitChat for Windows</Product><Version>0.1.8</Version><ApplicationManifest>app.manifest</ApplicationManifest>
+    <PublishSingleFile>true</PublishSingleFile><SelfContained>true</SelfContained><IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract><PublishTrimmed>false</PublishTrimmed><DebugType>none</DebugType>
+  </PropertyGroup>
+  <ItemGroup><PackageReference Include="CommunityToolkit.WinUI.Notifications" Version="7.1.2" /><PackageReference Include="NAudio" Version="2.2.1" /><PackageReference Include="QRCoder" Version="1.6.0" /><PackageReference Include="ZXing.Net" Version="0.16.10" /></ItemGroup>
+  <ItemGroup><Content Include="../vendor/media/*" Link="media/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" /></ItemGroup>
+  <ItemGroup><Content Include="../vendor/tor/**/*" Link="tor/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" /></ItemGroup>
+  <ItemGroup><EmbeddedResource Include="Assets/world_borders.geojson" LogicalName="BitChat.Assets.world_borders.geojson" /></ItemGroup>
+  <ItemGroup><ProjectReference Include="../BitChat.Core/BitChat.Core.csproj" /></ItemGroup>
+</Project>

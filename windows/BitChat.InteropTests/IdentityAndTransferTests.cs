@@ -10,6 +10,7 @@ internal static class IdentityAndTransferTests
         check(ambiguous,"Duplicate nicknames cannot silently address the first matching identity");
         check(IdentityNames.Resolve("2222222222222222",contacts)=="2222222222222222","An explicit peer ID disambiguates identical nicknames");
         check(!IdentityNames.Display("Alice\u202E\nBob").Contains('\u202E')&&!IdentityNames.Display("Alice\nBob").Contains('\n'),"Display names cannot inject bidi overrides or extra identity rows");
+        check(IdentityNames.SenderLabel("Alice\nadmin","0123456789abcdef")=="[0123456789abcdef] Aliceadmin","Notification sender labels put the actual ID before an untrusted nickname");
         var attempted=new List<int>();var outcomes=new List<bool>();
         await AttachmentBatch.Run(new[]{1,2,3},item=>{attempted.Add(item);if(item==1)throw new IOException("simulated first-file failure");return Task.CompletedTask;},(_,error)=>outcomes.Add(error==null));
         check(attempted.SequenceEqual(new[]{1,2,3})&&outcomes.SequenceEqual(new[]{false,true,true}),"A failed first file does not prevent the remaining selected files from sending");
@@ -27,10 +28,14 @@ internal static class IdentityAndTransferTests
         using var pc=new MeshEngine(RandomNumberGenerator.GetBytes(32),RandomNumberGenerator.GetBytes(32),"Windows",packet=>Send(false,packet)){Capabilities=[0x79,0x03]};
         async Task Pump(){int budget=1000;while(transit.Count>0){if(--budget==0)throw new Exception("Identity test relay loop");var item=transit.Dequeue();await(item.ToPc?pc:victim).Receive(item.Packet.Encode());}}
         var messages=new List<ChatMessage>();pc.Message+=messages.Add;
+        int unauthenticatedControls=0;pc.TypedPayload+=(_,type,_)=>{if(type is 0x23 or 0x24 or 0x25)unauthenticatedControls++;};
         MeshPacket Signed(byte type,byte[] payload){var packet=new MeshPacket(type,victim.PeerId,payload,Timestamp:(ulong)Bytes.Now);return packet with{Signature=Crypto.SignEd(attackerSigning,packet.SigningBytes())};}
         // The attacker knows Alice's PUBLIC Noise key, but has neither private key.
         var fakeAnn=Signed(1,new Announcement("Alice",Crypto.PublicX(victimNoise),Crypto.PublicEd(attackerSigning),[0x79,0x03]).Encode());
         await pc.Receive(fakeAnn.Encode());await pc.Receive(Signed(2,Bytes.Utf8("forged Alice message")).Encode());
+        await pc.Receive(Signed(0x23,Bytes.Utf8("forged board event")).Encode());
+        await pc.Receive(new MeshPacket(0x25,victim.PeerId,Bytes.Utf8("unsigned group event"),Timestamp:(ulong)Bytes.Now).Encode());
+        check(unauthenticatedControls==0,"Unproven signed board events and unsigned group events cannot bypass author authentication");
         check(messages.Count==0,"Copied public Noise key plus an attacker's self-signature cannot impersonate a fresh contact");
         await pc.Announce();await Pump();
         check(messages.Count==0,"A forged public message stays rejected after the real Noise owner authenticates");

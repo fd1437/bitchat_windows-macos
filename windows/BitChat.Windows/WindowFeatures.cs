@@ -65,7 +65,7 @@ public sealed partial class MainWindow
         var toast=new Window{Width=390,Height=hide?172:IsImage(message)?295:210,WindowStyle=WindowStyle.None,ResizeMode=ResizeMode.NoResize,ShowInTaskbar=false,ShowActivated=false,Topmost=true,Background=panel,Foreground=Foreground,AllowsTransparency=true,Opacity=.98};
         var border=new Border{Background=panel,BorderBrush=green,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(9),Padding=new Thickness(15),Effect=new System.Windows.Media.Effects.DropShadowEffect{BlurRadius=16,ShadowDepth=3,Opacity=.35}};
         var stack=new StackPanel();border.Child=stack;toast.Content=border;
-        var heading=new DockPanel();var close=new Button{Content="×",Background=Brushes.Transparent,Foreground=muted,BorderThickness=new Thickness(0),Padding=new Thickness(8,0,8,0),FontSize=17};close.Click+=(_,_)=>toast.Close();DockPanel.SetDock(close,Dock.Right);heading.Children.Add(close);heading.Children.Add(new TextBlock{Text=hide?"BitChat":"BitChat · "+message.Sender,Foreground=green,FontWeight=FontWeights.SemiBold,VerticalAlignment=VerticalAlignment.Center});stack.Children.Add(heading);
+        var heading=new DockPanel();var close=new Button{Content="×",Background=Brushes.Transparent,Foreground=muted,BorderThickness=new Thickness(0),Padding=new Thickness(8,0,8,0),FontSize=17};close.Click+=(_,_)=>toast.Close();DockPanel.SetDock(close,Dock.Right);heading.Children.Add(close);heading.Children.Add(new TextBlock{Text=hide?"BitChat":"BitChat · "+IdentityNames.SenderLabel(message.Sender,message.Peer),Foreground=green,FontWeight=FontWeights.SemiBold,VerticalAlignment=VerticalAlignment.Center});stack.Children.Add(heading);
         if(!hide)
         {
             var body=new TextBlock{Text=message.Text,Foreground=Foreground,TextWrapping=TextWrapping.Wrap,MaxHeight=56,Margin=new Thickness(0,8,0,4)};stack.Children.Add(body);
@@ -106,7 +106,7 @@ public sealed partial class MainWindow
         status.Text="Message alert fallback: "+error.Message;
         try
         {
-            tray.BalloonTipTitle=store.State.HideNotificationPreviews?"BitChat":"BitChat · "+message.Sender;
+            tray.BalloonTipTitle=store.State.HideNotificationPreviews?"BitChat":"BitChat · "+IdentityNames.SenderLabel(message.Sender,message.Peer);
             string body=store.State.HideNotificationPreviews?"New message":message.Text;
             tray.BalloonTipText=body.Length>240?body[..240]:body;
             tray.ShowBalloonTip(6000);

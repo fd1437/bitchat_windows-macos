@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Media.Imaging;
 using CommunityToolkit.WinUI.Notifications;
+using BitChat.Core;
 
 namespace BitChat.Windows;
 
@@ -101,7 +102,7 @@ internal static class NativeNotifications
                 catch{}
             }
             string Tag(string text)=>Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..16];
-            BuildContent(message.Conversation,message.Sender,message.Text.Length>800?message.Text[..800]:message.Text,image,store.State.HideNotificationPreviews).Show(toast=>{toast.Tag=Tag(message.Id);toast.Group=Tag(message.Conversation);toast.ExpirationTime=DateTimeOffset.Now.AddDays(1);});
+            BuildContent(message.Conversation,IdentityNames.SenderLabel(message.Sender,message.Peer),message.Text.Length>800?message.Text[..800]:message.Text,image,store.State.HideNotificationPreviews).Show(toast=>{toast.Tag=Tag(message.Id);toast.Group=Tag(message.Conversation);toast.ExpirationTime=DateTimeOffset.Now.AddDays(1);});
             return true;
         }
         catch{return false;}

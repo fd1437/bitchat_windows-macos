@@ -113,7 +113,7 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
     {
         foreach(var bytes in frames.TakeLast(1000))
         {
-            try{var p=MeshPacket.Decode(bytes);string peer=Bytes.Hex(p.Sender);var key=peer==Id?Crypto.PublicEd(signingSeed):peers.GetValueOrDefault(peer)?.SigningKey;if(key!=null&&p.Signature!=null&&Crypto.VerifyEd(key,p.SigningBytes(),p.Signature))Remember(p);}catch(Exception e)when(e is InvalidDataException or ArgumentException or OverflowException){}
+            try{var p=MeshPacket.Decode(bytes);string peer=Bytes.Hex(p.Sender);var known=peers.GetValueOrDefault(peer);var key=peer==Id?Crypto.PublicEd(signingSeed):AuthorProven(known)?known!.SigningKey:null;if(key!=null&&p.Signature!=null&&Crypto.VerifyEd(key,p.SigningBytes(),p.Signature))Remember(p);}catch(Exception e)when(e is InvalidDataException or ArgumentException or OverflowException){}
         }
     }
     public async Task RequestSync()
@@ -144,7 +144,7 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
             if(p.Timestamp>(ulong)(Bytes.Now+300000))return;
             if(p.IsRsr&&Bytes.Now-lastSyncRequest>60000)return;
             peers.TryGetValue(peerId,out var prevalidatedPeer);
-            if(p.Type is 2 or 0x22 or 0x28 or 0x29 or 0x2A or 0x26 or 0x27 or 3&&!AuthorProven(prevalidatedPeer)&&p.Signature!=null)
+            if(p.Type is 2 or 0x22 or 0x23 or 0x24 or 0x25 or 0x28 or 0x29 or 0x2A or 0x26 or 0x27 or 3&&!AuthorProven(prevalidatedPeer)&&p.Signature!=null)
             {
                 DeferAuthor(p,ingress,ingressEpoch);
                 if(prevalidatedPeer!=null)await EnsureMediaSessionLocked(peerId);
@@ -242,7 +242,9 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
                         await send(Packet(0x27,p.Payload,peerId));break;
                     case 0x27:
                         if(peer!=null&&p.Payload.Length==9&&p.Signature!=null&&Crypto.VerifyEd(peer.SigningKey,p.SigningBytes(),p.Signature)&&probes.Remove(Bytes.Hex(p.Payload[..8]),out var probe)&&probe.Peer==peerId)Status?.Invoke($"Pong from {peer.Nickname} · {Bytes.Now-probe.Started} ms · {8-p.Ttl} hops");break;
-                    default:TypedPayload?.Invoke(peerId,p.Type,p.Payload);break;
+                    case 0x23:case 0x24:case 0x25:
+                        if(AuthorProven(peer)&&p.Signature!=null&&Crypto.VerifyEd(peer!.SigningKey,p.SigningBytes(),p.Signature))TypedPayload?.Invoke(peerId,p.Type,p.Payload);
+                        break;
                 }
             }
             if(p.Signature!=null&&AuthorProven(peer)&&Crypto.VerifyEd(peer!.SigningKey,p.SigningBytes(),p.Signature))Remember(p);

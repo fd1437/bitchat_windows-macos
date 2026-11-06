@@ -17,4 +17,5 @@ public static class IdentityNames
         if(matches.Length>1)throw new ArgumentException("Several identities use this nickname. Use the full peer ID from the sidebar or /who.");
         return matches.Length==1?matches[0].Id:throw new ArgumentException("Unknown peer: "+name);
     }
+    public static string SenderLabel(string nickname,string? id)=>id==null?Display(nickname):"["+id[..Math.Min(16,id.Length)]+"] "+Display(nickname);
 }

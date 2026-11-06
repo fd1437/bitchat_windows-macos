@@ -229,14 +229,15 @@ using var pcSession=new MeshEngine(pcNoise,pcSigning,"pc",packet=>PrivateLink(fa
 var privateReceived=new List<ChatMessage>();pcSession.Message+=privateReceived.Add;
 await macSession.Announce();await pcSession.Announce();
 foreach(var item in privateTransit.ToArray())await(item.ToReceiver?pcSession:macSession).Receive(item.Packet.Encode());privateTransit.Clear();
-await macSession.SendPrivate(pcSession.Id,"private ciphertext before final handshake","early-private-1");
+string earlyPrivateText="private ciphertext before final handshake "+new string('x',140);
+await macSession.SendPrivate(pcSession.Id,earlyPrivateText,"early-private-1");
 var firstPrivate=privateTransit[0];privateTransit.Clear();await pcSession.Receive(firstPrivate.Packet.Encode());
 var secondPrivate=privateTransit[0];privateTransit.Clear();await macSession.Receive(secondPrivate.Packet.Encode());
 var finalHandshake=privateTransit.Single(item=>item.Packet.Type==0x10);
-foreach(var item in privateTransit.Where(item=>item.Packet.Type==0x11).ToArray())await pcSession.Receive(item.Packet.Encode());privateTransit.Clear();
+foreach(var item in privateTransit.Where(item=>item.Packet.Type==0x11).ToArray())foreach(var fragment in FragmentAssembler.Split(item.Packet,128))await pcSession.Receive(fragment.Encode());privateTransit.Clear();
 Check(privateReceived.Count==0,"Early private ciphertext stays private until the exact session authenticates");
 await pcSession.Receive(finalHandshake.Packet.Encode());
-Check(privateReceived.Count==1&&privateReceived[0].Content=="private ciphertext before final handshake","Out-of-order Mac private message is delivered after handshake authentication");
+Check(privateReceived.Count==1&&privateReceived[0].Content==earlyPrivateText,"Fragmented out-of-order Mac private message is delivered after handshake authentication");
 privateTransit.Clear();
 using var restartedPc=new MeshEngine(pcNoise,pcSigning,"restarted pc",packet=>PrivateLink(false,packet));
 restartedPc.RestorePeer(new(macSession.Id,"mac",Crypto.PublicX(macNoise),Crypto.PublicEd(macSigning),[0],Bytes.Now));

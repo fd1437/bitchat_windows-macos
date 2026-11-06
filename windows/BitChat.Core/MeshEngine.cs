@@ -168,7 +168,8 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
                     {
                         if(!earlyCiphertexts.TryGetValue(peerId,out var queue))earlyCiphertexts[peerId]=queue=[];
                         queue.RemoveAll(item=>item.Generation!=incomingSession.Generation);
-                        if(queue.Count<8&&earlyCiphertexts.Values.Sum(q=>q.Sum(item=>item.Bytes.Length))+bytes.Length<=256*1024&&!queue.Any(item=>item.Bytes.SequenceEqual(bytes)))queue.Add(new(bytes.ToArray(),ingress,ingressEpoch,Bytes.Now,incomingSession.Generation));
+                        byte[] reconstructed=p.Encode();
+                        if(queue.Count<8&&earlyCiphertexts.Values.Sum(q=>q.Sum(item=>item.Bytes.Length))+reconstructed.Length<=256*1024&&!queue.Any(item=>item.Bytes.SequenceEqual(reconstructed)))queue.Add(new(reconstructed,ingress,ingressEpoch,Bytes.Now,incomingSession.Generation));
                     }
                     return;
                 }

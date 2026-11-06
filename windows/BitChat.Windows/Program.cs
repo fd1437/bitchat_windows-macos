@@ -17,7 +17,7 @@ public static class Program
         {
             var app=new Application();
             if(args.Contains("--unregister-notifications")){NativeNotifications.Uninstall();return;}
-            if(args.Length>=2&&args[0]=="--self-test"){Task.Run(()=>Diagnostics.Run(args[1])).GetAwaiter().GetResult();Diagnostics.RenderUi(Path.ChangeExtension(args[1],".png")).GetAwaiter().GetResult();return;}
+            if(args.Length>=2&&args[0]=="--self-test"){Task.Run(()=>Diagnostics.Run(args[1])).GetAwaiter().GetResult();Diagnostics.RenderUiOnDispatcher(app,Path.ChangeExtension(args[1],".png"));return;}
             app.DispatcherUnhandledException+=(_,e)=>{MessageBox.Show(e.Exception.Message,"BitChat",MessageBoxButton.OK,MessageBoxImage.Error);e.Handled=true;};
             using var instance=new Mutex(true,@"Local\BitChat.Windows.Instance",out bool first);
             using var activate=new EventWaitHandle(false,EventResetMode.AutoReset,@"Local\BitChat.Windows.Activate");

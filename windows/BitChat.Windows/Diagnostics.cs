@@ -163,6 +163,28 @@ public static class Diagnostics
         await Check("Bluetooth adapter",async()=>{var adapter=await BluetoothAdapter.GetDefaultAsync();return adapter==null?"No adapter detected; Bluetooth hardware validation is still required":$"Central={adapter.IsCentralRoleSupported}, Peripheral={adapter.IsPeripheralRoleSupported}";});
         var report=new{generatedUtc=DateTimeOffset.UtcNow,os=Environment.OSVersion.VersionString,architecture=RuntimeInformation.ProcessArchitecture.ToString(),checks};Environment.ExitCode=checks.Any(c=>!c.Passed)?1:0;await File.WriteAllTextAsync(reportPath,JsonSerializer.Serialize(report,new JsonSerializerOptions{WriteIndented=true}));
     }
+    public static void RenderUiOnDispatcher(Application app,string path)
+    {
+        // Self-tests run before Application.Run. Async UI checks still need
+        // the same dispatcher context and message pump as the normal app.
+        var previous=SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(new System.Windows.Threading.DispatcherSynchronizationContext(app.Dispatcher));
+        try
+        {
+            Task render=RenderUi(path);
+            if(!render.IsCompleted)
+            {
+                var frame=new System.Windows.Threading.DispatcherFrame();
+                var timeout=new System.Windows.Threading.DispatcherTimer{Interval=TimeSpan.FromSeconds(45)};
+                timeout.Tick+=(_,_)=>{timeout.Stop();frame.Continue=false;};timeout.Start();
+                _=render.ContinueWith(_=>app.Dispatcher.BeginInvoke(new Action(()=>frame.Continue=false)),TaskScheduler.Default);
+                System.Windows.Threading.Dispatcher.PushFrame(frame);timeout.Stop();
+                if(!render.IsCompleted)throw new TimeoutException("Native UI diagnostics timed out");
+            }
+            render.GetAwaiter().GetResult();
+        }
+        finally{SynchronizationContext.SetSynchronizationContext(previous);}
+    }
     public static async Task RenderUi(string path)
     {
         string originalRoot=StateStore.Root;string temporary=Path.Combine(Path.GetDirectoryName(path)!,"bitchat-diagnostic-"+Guid.NewGuid().ToString("N"));StateStore.OverrideRoot=temporary;

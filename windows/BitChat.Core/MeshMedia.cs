@@ -9,12 +9,16 @@ public sealed partial class MeshEngine
     private sealed class RetainedMedia(string peer, MediaPacket media, Guid generation, long created)
     {
         public string Peer=peer;public MediaPacket Media=media;public Guid Generation=generation,LastLinkEpoch;
-        public long Created=created;public int Retries;
+        public long Created=created;public int Retries,InFlight;
     }
     private readonly Dictionary<string,RetainedMedia> retainedMedia=[];
     private readonly Dictionary<string,Guid> mediaLinkEpochs=[];
+    private readonly HashSet<string> observedMediaLinks=[];
+    private readonly Queue<string> observedMediaLinkOrder=[];
     private readonly Dictionary<string,int> mediaRetryBudgets=[];
     private readonly HashSet<string> mediaCapable=[];
+    private readonly Queue<(string Peer,string Id,string Name,MeshPacket Packet)> deferredMediaPackets=[];
+    public event Action<string?,string,MeshPacket>? MediaSending;
     public Func<string,string,MediaPacket,Task<bool>>? AcceptPrivateMedia{get;set;}
     public event Action<string>? MediaCapabilityObserved;
     public event Action<string,string,string>? MediaTransferStatus;
@@ -73,15 +77,17 @@ public sealed partial class MeshEngine
     public async Task SendMedia(MediaPacket media,string? recipient=null,bool allowLegacyFallback=false)
     {
         var encoded=media.Encode();
-        if(recipient==null){if(await send(Packet(0x22,encoded,version:2))==0)throw new IOException("No Bluetooth connection accepted this attachment");return;}
+        if(recipient==null){var packet=Packet(0x22,encoded,version:2);MediaSending?.Invoke(null,media.Name,packet);if(await send(packet)==0)throw new IOException("No Bluetooth connection accepted this attachment");return;}
         var policy=await ResolvePrivateMediaPolicy(recipient);
         if(policy==PrivateMediaSendPolicy.AwaitingCapabilityProof)throw new IOException("Encrypted media support is still being authenticated; retry shortly");
-        await gate.WaitAsync();
+        MeshPacket outbound;string? retainedId=null;await gate.WaitAsync();
         try
         {
             PruneMediaLocked();policy=MediaPolicyLocked(recipient);
             if(policy==PrivateMediaSendPolicy.LegacyRequiresConsent&&allowLegacyFallback)
-            {if(await send(Packet(0x22,encoded,recipient,version:2))==0)throw new IOException("No Bluetooth connection accepted this attachment");return;}
+            {outbound=Packet(0x22,encoded,recipient,version:2);}
+            else
+            {
             if(policy==PrivateMediaSendPolicy.LegacyRequiresConsent)throw new IOException("This contact needs explicit consent for each unencrypted legacy attachment");
             if(policy!=PrivateMediaSendPolicy.Encrypted)throw new IOException("Encrypted media capability could not be confirmed; downgrade blocked");
             var session=sessions[recipient];
@@ -89,24 +95,29 @@ public sealed partial class MeshEngine
             if(id!=null&&ReceiptCapable(session)&&!retainedMedia.ContainsKey(id)
                 &&retainedMedia.Count<8&&retainedMedia.Values.Sum(p=>p.Media.Content.Length)+media.Content.Length<=4*1024*1024)
                 retainedMedia[id]=new(recipient,media with{Content=media.Content.ToArray()},session.Generation,MediaClock()){LastLinkEpoch=mediaLinkEpochs.GetValueOrDefault(recipient)};
-            if(await SendMediaOnSessionLocked(recipient,encoded,session)==0)throw new IOException("Bluetooth transfer interrupted; waiting for reconnection");
-            if(id!=null&&retainedMedia.TryGetValue(id,out var completed))completed.Created=MediaClock();
+            outbound=MediaPacketOnSessionLocked(recipient,encoded,session);retainedId=id;if(id!=null&&retainedMedia.TryGetValue(id,out var active))active.InFlight++;
+            }
         }
         finally{gate.Release();}
+        MediaSending?.Invoke(recipient,media.Name,outbound);
+        int accepted;
+        try{accepted=await send(outbound);}
+        finally{await gate.WaitAsync();try{if(retainedId!=null&&retainedMedia.TryGetValue(retainedId,out var completed)){completed.InFlight=Math.Max(0,completed.InFlight-1);completed.Created=MediaClock();}}finally{gate.Release();}}
+        if(accepted==0)throw new IOException("Bluetooth transfer interrupted; waiting for reconnection");
     }
-    private Task<int> SendMediaOnSessionLocked(string peer,byte[] encoded,Session session)
+    private MeshPacket MediaPacketOnSessionLocked(string peer,byte[] encoded,Session session)
     {
         if(sessions.GetValueOrDefault(peer)!=session||session.Send==null||session.ProvenCapabilities==null||!HasCapability(session.ProvenCapabilities,8))
             throw new IOException("Private media session changed before send");
         var plain=Bytes.Join([0x20],encoded);
-        return send(Packet(0x11,session.Send.Encrypt(plain),peer,plain.Length>60000?(byte)2:(byte)1,false));
+        return Packet(0x11,session.Send.Encrypt(plain),peer,plain.Length>60000?(byte)2:(byte)1,false);
     }
     private void ReleaseRetainedMedia(string id)
     {if(retainedMedia.Remove(id,out var item))CryptographicOperations.ZeroMemory(item.Media.Content);}
     private void PruneMediaLocked()
     {
         foreach(var (id,item) in retainedMedia.ToArray())
-            if(MediaClock()-item.Created>120000||IsBlocked(item.Peer))
+            if(item.InFlight==0&&MediaClock()-item.Created>120000||IsBlocked(item.Peer))
             {ReleaseRetainedMedia(id);MediaTransferStatus?.Invoke(item.Peer,id,"unconfirmed");}
     }
     public async Task MaintainPrivateMedia()
@@ -121,7 +132,8 @@ public sealed partial class MeshEngine
         await gate.WaitAsync();
         try
         {
-            if(mediaLinkEpochs.GetValueOrDefault(peer)==linkEpoch)return;
+            string linkKey=peer+":"+linkEpoch.ToString("N");if(!observedMediaLinks.Add(linkKey))return;
+            observedMediaLinkOrder.Enqueue(linkKey);while(observedMediaLinkOrder.Count>1024)observedMediaLinks.Remove(observedMediaLinkOrder.Dequeue());
             mediaLinkEpochs[peer]=linkEpoch;
             PruneMediaLocked();
             if(!retainedMedia.Values.Any(p=>p.Peer==peer&&p.Retries<2))return;
@@ -145,8 +157,9 @@ public sealed partial class MeshEngine
             await RetryMediaLocked(peer,session,linkEpoch,false);
         }
         finally{gate.Release();}
+        await FlushMediaRetries();
     }
-    private async Task RetryMediaLocked(string peer,Session session,Guid epoch,bool newAuthentication)
+    private Task RetryMediaLocked(string peer,Session session,Guid epoch,bool newAuthentication)
     {
         PruneMediaLocked();
         if(!ReceiptCapable(session))
@@ -154,7 +167,7 @@ public sealed partial class MeshEngine
             if(session.ProvenCapabilities!=null)
                 foreach(var (id,item) in retainedMedia.Where(p=>p.Value.Peer==peer&&p.Value.Generation!=session.Generation).ToArray())
                 {ReleaseRetainedMedia(id);MediaTransferStatus?.Invoke(peer,id,"retry blocked: receipt capability unavailable");}
-            return;
+            return Task.CompletedTask;
         }
         string budgetKey=peer+":"+epoch.ToString("N");
         int count=mediaRetryBudgets.GetValueOrDefault(budgetKey);
@@ -165,8 +178,20 @@ public sealed partial class MeshEngine
             if(item.Retries>=2||!newAuthentication&&item.LastLinkEpoch==epoch||newAuthentication&&item.Generation==session.Generation)continue;
             item.LastLinkEpoch=epoch;item.Generation=session.Generation;item.Retries++;item.Created=MediaClock();count++;
             mediaRetryBudgets[budgetKey]=count;
-            int accepted=await SendMediaOnSessionLocked(peer,item.Media.Encode(),session);
-            MediaTransferStatus?.Invoke(peer,id,accepted>0?"awaiting receipt":"interrupted; waiting for reconnection");
+            item.InFlight++;deferredMediaPackets.Enqueue((peer,id,item.Media.Name,MediaPacketOnSessionLocked(peer,item.Media.Encode(),session)));
+        }
+        return Task.CompletedTask;
+    }
+    private async Task FlushMediaRetries()
+    {
+        (string Peer,string Id,string Name,MeshPacket Packet)[] packets;
+        await gate.WaitAsync();try{packets=deferredMediaPackets.ToArray();deferredMediaPackets.Clear();}finally{gate.Release();}
+        foreach(var item in packets)
+        {
+            MediaSending?.Invoke(item.Peer,item.Name,item.Packet);int accepted;
+            try{accepted=await send(item.Packet);}
+            finally{await gate.WaitAsync();try{if(retainedMedia.TryGetValue(item.Id,out var retained)){retained.InFlight=Math.Max(0,retained.InFlight-1);retained.Created=MediaClock();}}finally{gate.Release();}}
+            MediaTransferStatus?.Invoke(item.Peer,item.Id,accepted>0?"awaiting receipt":"interrupted; waiting for reconnection");
         }
     }
 }

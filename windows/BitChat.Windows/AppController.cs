@@ -28,6 +28,7 @@ public sealed partial class AppController:IAsyncDisposable
     public AppController(StateStore store)
     {
         Store=store;bridgeCourier=new(store.State.BridgeDrops,snapshot=>Post(()=>{if(snapshot.Revision>=Store.State.BridgeDrops.Revision){Store.State.BridgeDrops=snapshot;Store.Save();}}));ConfigureCourierBridge();mediaLedger=new(Path.Combine(StateStore.Root,"media"),ProtectMediaDecision,UnprotectMediaDecision);Mesh=new(store.State.NoiseKey,store.State.SigningSeed,store.State.Nickname,Bluetooth.Send){Capabilities=[0x79,0x03],IsBlocked=id=>Store.State.Blocked.Contains(id),BatteryPercent=()=>Store.State.ShareBattery?LocalBatteryPercent():null};
+        Mesh.MediaSending+=TrackMediaSend;Bluetooth.SendProgress+=ReportMediaSend;Bluetooth.SendFinished+=packet=>trackedSends.TryRemove(packet,out _);
         foreach(var pair in Store.State.KnownPeers){Peers[pair.Key]=pair.Value with{LastSeen=0,Authenticated=false};Mesh.RestorePeer(pair.Value);}
         foreach(var pair in Store.State.PinnedSigningKeys)Mesh.RestorePinnedKey(pair.Key,pair.Value);
         Mesh.RestoreArchive(Store.State.GossipArchive);
@@ -52,7 +53,7 @@ public sealed partial class AppController:IAsyncDisposable
         maintenance=Task.Run(async()=>
         {
             using var timer=new PeriodicTimer(TimeSpan.FromSeconds(15));
-            try{while(await timer.WaitForNextTickAsync(stop.Token)){Bluetooth.Maintain();await Mesh.Announce();if(Bluetooth.Connections>0)await Mesh.RequestSync();Post(()=>_=MaintainOnUi());PeersChanged?.Invoke();}}catch(OperationCanceledException){}
+            try{while(await timer.WaitForNextTickAsync(stop.Token)){Bluetooth.Maintain();await Mesh.Announce();if(Bluetooth.Connections>0&&trackedSends.IsEmpty)await Mesh.RequestSync();Post(()=>_=MaintainOnUi());PeersChanged?.Invoke();}}catch(OperationCanceledException){}
         });
         if(Store.State.UseTor){tor=new();tor.Status+=s=>Status?.Invoke(s);Relays.Proxy=await tor.Start(stop.Token);}
         Relays.Start(Store.State.Relays);

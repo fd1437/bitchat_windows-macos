@@ -6,6 +6,28 @@ namespace BitChat.Windows;
 
 public sealed partial class AppController
 {
+    public sealed record FileSendProgress(string Conversation,string Id,string Name,int Percent);
+    private sealed class TrackedSend(string conversation,string id,string name)
+    {public string Conversation=conversation,Id=id,Name=name;public int Percent=-1;public long LastReport;}
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<MeshPacket,TrackedSend> trackedSends=new(ReferenceEqualityComparer.Instance);
+    public event Action<FileSendProgress>? FileProgress;
+    private void TrackMediaSend(string? peer,string name,MeshPacket packet)
+    {
+        string conversation=peer==null?"mesh":"mesh:"+peer;
+        StoredMessage? message;lock(Store.State.Messages)message=Store.State.Messages.LastOrDefault(m=>m.Own&&m.Conversation==conversation&&m.Text==name&&m.Attachment!=null);
+        if(message!=null)trackedSends[packet]=new(conversation,message.Id,name);
+    }
+    private void ReportMediaSend(MeshPacket packet,long bytes,long total)
+    {
+        if(!trackedSends.TryGetValue(packet,out var item)||total<=0)return;
+        int percent=(int)Math.Min(99,bytes*100/total);
+        lock(item)
+        {
+            if(percent<=item.Percent||percent<99&&Bytes.Now-item.LastReport<150)return;
+            item.Percent=percent;item.LastReport=Bytes.Now;
+        }
+        Post(()=>{if(trackedSends.ContainsKey(packet))FileProgress?.Invoke(new(item.Conversation,item.Id,item.Name,percent));});
+    }
     private readonly PrivateMediaLedger mediaLedger;
     private long lastMediaRetentionSweep;
     public Func<string,Task<bool>>? ConfirmLegacyMedia{get;set;}

@@ -207,6 +207,7 @@ public sealed partial class MainWindow:Window
     private void Ui(Action action){if(Dispatcher.CheckAccess())action();else Dispatcher.BeginInvoke(action);}
     private void BindController()
     {
+        controller.FileProgress+=progress=>Ui(()=>ShowFileProgress(progress));
         controller.VoiceNoteReady+=(target,media)=>Ui(()=>{AddDraft(target,media);if(recordButton!=null)recordButton.Content="●  Record";});
         controller.Dispatch=action=>Ui(action);controller.IsAppActive=()=>IsActive&&WindowState!=WindowState.Minimized;
         controller.ConfirmLegacyMedia=peer=>Task.FromResult(MessageBox.Show(this,"This contact ("+peer+") has not proved encrypted attachment support. Send this attachment without end-to-end encryption? Nearby relays may read it. This approval applies only to this send.","Legacy attachment",MessageBoxButton.YesNo,MessageBoxImage.Warning)==MessageBoxResult.Yes);
@@ -219,23 +220,26 @@ public sealed partial class MainWindow:Window
     private void RefreshChannels()
     {
         channels.Children.Clear();void Label(string s)=>channels.Children.Add(new TextBlock{Text=s,Foreground=muted,Margin=new Thickness(18,18,12,6),FontSize=10});
-        void Channel(string id,string label){var b=Button(label,()=>Select(id));b.Content=new TextBlock{Text=label,TextTrimming=TextTrimming.CharacterEllipsis};b.HorizontalContentAlignment=HorizontalAlignment.Left;b.Padding=new Thickness(14,9,8,9);b.BorderThickness=new Thickness(id==conversation?1:0);channels.Children.Add(b);}
+        void Channel(string id,string label){var b=Button(label,()=>Select(id));b.ToolTip=label;b.Content=new TextBlock{Text=label,TextTrimming=TextTrimming.CharacterEllipsis};b.HorizontalContentAlignment=HorizontalAlignment.Left;b.Padding=new Thickness(14,9,8,9);b.BorderThickness=new Thickness(id==conversation?1:0);channels.Children.Add(b);}
         Label("CHANNELS");Channel("mesh","# bluetooth mesh");Channel("board","⌖ mesh board");
         if(Geohash.Valid(store.State.Cell)){Channel("geo:"+store.State.Cell,"# "+store.State.Cell);Channel("notes:"+store.State.Cell,"⌖ nearby notes");}
         channels.Children.Add(Button("+ location channel",()=>JoinLocation()));Label("GROUPS");foreach(var g in store.State.Groups.Values)Channel(g.Conversation,"# "+g.Name);channels.Children.Add(Button("+ private group",CreateGroup));Label("NEARBY");
         foreach(var p in controller.Peers.Values.Where(p=>p.LastSeen>Bytes.Now-120000&&!store.State.Blocked.Contains(p.Id)).OrderBy(p=>p.Nickname))
-        {string favorite=store.State.Favorites.Contains(p.Id)?"★ ":"";string verified=store.State.Verified.ContainsKey(Bytes.Hex(Crypto.Hash(p.NoiseKey)))?"✓ ":"";string battery=p.BatteryPercent is byte value?$" · {value}% ⚡":"";Channel("mesh:"+p.Id,$"{favorite}{verified}{(p.Authenticated?"●":"○")} {p.Nickname}{battery}");}
+        {string favorite=store.State.Favorites.Contains(p.Id)?"★ ":"";string verified=store.State.Verified.ContainsKey(Bytes.Hex(Crypto.Hash(p.NoiseKey)))?"✓ ":"";string battery=p.BatteryPercent is byte value?$" · {value}% ⚡":"";Channel("mesh:"+p.Id,$"{favorite}{verified}{(p.Authenticated?"●":"○")} {p.Id}\n{IdentityNames.Display(p.Nickname)}{battery}");}
         foreach(var recent in store.State.Messages.Where(m=>m.Conversation.StartsWith("mesh:")&&!store.State.Blocked.Contains(m.Conversation[5..]))
             .GroupBy(m=>m.Conversation).Select(g=>g.OrderByDescending(m=>m.Timestamp).First()).OrderByDescending(m=>m.Timestamp))
             if(!controller.Peers.TryGetValue(recent.Conversation[5..],out var live)||live.LastSeen<=Bytes.Now-120000)
                 Channel(recent.Conversation,"@ "+(store.State.NoiseContacts.GetValueOrDefault(recent.Conversation[5..])?.Nickname??store.State.KnownPeers.GetValueOrDefault(recent.Conversation[5..])?.Nickname??(!recent.Own?recent.Sender:recent.Conversation[5..13])));
-        Label("PRIVATE MESSAGES");foreach(var p in store.State.NostrPeers.Where(p=>!store.State.Blocked.Contains(p.Key)).OrderBy(p=>p.Value))Channel("nostr:"+p.Key,"@ "+p.Value);
+        Label("PRIVATE MESSAGES");foreach(var p in store.State.NostrPeers.Where(p=>!store.State.Blocked.Contains(p.Key)).OrderBy(p=>p.Value))Channel("nostr:"+p.Key,p.Key[..Math.Min(16,p.Key.Length)]+"\n@ "+IdentityNames.Display(p.Value));
         channels.Children.Add(Button("+ Nostr contact",()=>NewContact()));
     }
     private void Select(string id)
     {
         SendTyping(false);typingStopTimer.Stop();activeTypingPeer=null;
         conversation=id;RefreshDraft();title.Text=id switch{"mesh"=>"# bluetooth mesh","board"=>"⌖ mesh board",_ when id.StartsWith("mesh:")=>"@ "+(controller.Peers.GetValueOrDefault(id[5..])?.Nickname??id[5..]),_ when id.StartsWith("group:")=>"# "+store.State.Groups[id].Name,_ when id.StartsWith("nostr:")=>"@ "+store.State.NostrPeers.GetValueOrDefault(id[6..],id[6..8]),_ when id.StartsWith("notes:")=>"⌖ notes #"+id[6..],_=>"# "+id[4..]};
+        if(id.StartsWith("mesh:"))title.Text=IdentityNames.Display(title.Text)+" · "+id[5..];
+        if(id.StartsWith("nostr:"))title.Text=IdentityNames.Display(title.Text)+" · "+id[6..Math.Min(id.Length,22)];
+        title.ToolTip="A nickname is not unique. Compare the peer ID and verify the fingerprint with the identity button.";
         if(filesButton!=null){int count=store.State.Messages.Count(m=>m.Conversation==id&&m.Mime!=null);filesButton.Content=$"files · {count}";filesButton.IsEnabled=count>0;}
         messages.Children.Clear();receiptLabels.Clear();StoredMessage[] history;lock(store.State.Messages)history=store.State.Messages.Where(m=>m.Conversation==id).OrderBy(m=>m.Timestamp).TakeLast(500).ToArray();foreach(var m in history)Append(m);
         if(history.Length==0)messages.Children.Add(new TextBlock{Text=id=="mesh"?"Messages travel through nearby devices over Bluetooth LE.\nChoose a location channel to chat over Nostr relays.":"No messages yet.",Foreground=muted,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,20,0,20)});
@@ -245,7 +249,9 @@ public sealed partial class MainWindow:Window
     private void Append(StoredMessage m)
     {
         var block=new StackPanel{Margin=new Thickness(0,8,0,10)};
-        var header=new StackPanel{Orientation=Orientation.Horizontal};header.Children.Add(new TextBlock{Text=m.Sender,Foreground=m.Own?green:Brushes.LightSkyBlue,FontWeight=FontWeights.SemiBold});
+        var header=new StackPanel{Orientation=Orientation.Horizontal};header.Children.Add(new TextBlock{Text=IdentityNames.Display(m.Sender),MaxWidth=160,TextTrimming=TextTrimming.CharacterEllipsis,ToolTip=IdentityNames.Display(m.Sender),Foreground=m.Own?green:Brushes.LightSkyBlue,FontWeight=FontWeights.SemiBold});
+        string? senderId=m.Own?controller.Mesh.Id:m.Peer;
+        if(senderId!=null)header.Children.Add(new TextBlock{Text="  ["+senderId[..Math.Min(16,senderId.Length)]+"]"+(m.Own?" you":""),ToolTip=senderId,FlowDirection=FlowDirection.LeftToRight,Foreground=muted,FontSize=10,VerticalAlignment=VerticalAlignment.Center});
         header.Children.Add(new TextBlock{Text="  "+DateTimeOffset.FromUnixTimeMilliseconds(m.Timestamp).ToLocalTime().ToString("HH:mm"),Foreground=muted,FontSize=10,VerticalAlignment=VerticalAlignment.Center});
         if(m.Own){var label=new TextBlock{Text="  "+m.Status,Foreground=muted,FontSize=10};receiptLabels[m.Id]=label;header.Children.Add(label);}block.Children.Add(header);
         var text=new TextBox{Text=m.LocalAttachmentDeleted?"File deleted on this device · "+m.Text:m.Text,IsReadOnly=true,TextWrapping=TextWrapping.Wrap,BorderThickness=new Thickness(0),Background=Brushes.Transparent,Foreground=Foreground,Padding=new Thickness(0,4,0,0)};block.Children.Add(text);
@@ -272,7 +278,7 @@ public sealed partial class MainWindow:Window
     private async Task Command(string text)
     {
         var parts=text.Split(' ',3,StringSplitOptions.RemoveEmptyEntries);string command=parts[0].ToLowerInvariant();string arg=parts.Length>1?parts[1]:"";
-        string Resolve(string name)=>controller.Peers.Values.FirstOrDefault(p=>p.Id.Equals(name,StringComparison.OrdinalIgnoreCase)||p.Nickname.Equals(name,StringComparison.OrdinalIgnoreCase))?.Id??store.State.NostrPeers.FirstOrDefault(p=>p.Key==name||p.Value==name).Key??throw new ArgumentException("Unknown peer: "+name);
+        string Resolve(string name)=>IdentityNames.Resolve(name,controller.Peers.Values.Select(p=>(p.Id,p.Nickname)).Concat(store.State.NostrPeers.Select(p=>(p.Key,p.Value))));
         switch(command)
         {
             case "/help":SystemMessage("/msg name text · /who · /block name · /unblock id · /fav name · /unfav name · /slap name · /hug name · /ping name · /clear · /drop note · /pay token · /trace name · /group create|invite|remove|leave\nShift+Enter inserts a line break. Triple-click bitchat to wipe local data.");break;
@@ -314,7 +320,7 @@ public sealed partial class MainWindow:Window
     {
         var name=Prompt("Private group","Group name","");if(name==null)return;
         var members=Prompt("Private group members","Comma-separated nearby nicknames (up to 15)","");if(members==null)return;
-        _=Guard(async()=>{var names=members.Split(',',StringSplitOptions.TrimEntries|StringSplitOptions.RemoveEmptyEntries);var ids=names.Select(n=>controller.Peers.Values.FirstOrDefault(p=>p.Nickname==n||p.Id==n)?.Id??throw new ArgumentException("Unknown peer: "+n)).ToArray();var group=await controller.CreateGroup(name,ids);Select(group.Conversation);});
+        _=Guard(async()=>{var names=members.Split(',',StringSplitOptions.TrimEntries|StringSplitOptions.RemoveEmptyEntries);var ids=names.Select(n=>IdentityNames.Resolve(n,controller.Peers.Values.Select(p=>(p.Id,p.Nickname)))).ToArray();var group=await controller.CreateGroup(name,ids);Select(group.Conversation);});
     }
     private void ShowQr()
     {

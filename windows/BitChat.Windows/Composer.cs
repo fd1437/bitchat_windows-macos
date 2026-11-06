@@ -111,10 +111,10 @@ public sealed partial class MainWindow
         catch(Exception error){status.Text="Paste: "+error.Message;return true;}
         return false;
     }
-    private bool sending,sendAgain;
+    private bool sending;
     private async Task Send()
     {
-        if(sending){sendAgain=true;status.Text="Sending current batch · the next draft will follow";return;}sending=true;
+        if(sending){status.Text="A batch is already sending · additional files remain in the draft for the next Send";return;}sending=true;
         try
         {
             if(controller.IsRecording){await controller.EndVoice(false);if(recordButton!=null)recordButton.Content="●  Record";}
@@ -140,7 +140,6 @@ public sealed partial class MainWindow
         }
         catch(Exception error){status.Text=error.Message;}
         finally{sending=false;currentAttachment=null;RefreshDraft();}
-        if(sendAgain){sendAgain=false;await Send();}
     }
     internal void VerifyDraftStaging()
     {

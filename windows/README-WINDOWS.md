@@ -238,8 +238,8 @@ not a hardware-measured throughput guarantee.
 
 The composer shows per-file percentages and overall batch progress. One failed
 file no longer stops the remaining files, failed drafts remain available for
-retry, and rejected selections report the limits explicitly. Send during a batch
-queues another draft pass. The 1 MiB per-file and 16-file / 8 MiB draft limits
+retry, and rejected selections report the limits explicitly. Additional selections
+stay in their conversation's draft while the current batch finishes. The 1 MiB per-file and 16-file / 8 MiB draft limits
 remain. Progress means radio transmission; remote delivery is shown separately
 when the peer/protocol supports a receipt. Native diagnostics exercise multiple
 drafts and the visible progress controls. Physical Bluetooth reconnect, throughput

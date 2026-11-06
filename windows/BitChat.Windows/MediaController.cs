@@ -108,9 +108,9 @@ public sealed partial class AppController
         DeliverStoredMedia(peer,conversation,id,Store.SaveMedia(media),media.Name,media.Mime);
     }
 
-    private async Task SendAttachment(string conversation,MediaPacket media)
+    private async Task SendAttachment(string conversation,MediaPacket media,CancellationToken cancellation=default)
     {
-        string? peer=conversation=="mesh"?null:conversation[5..];bool allowLegacy=false;
+        cancellation.ThrowIfCancellationRequested();string? peer=conversation=="mesh"?null:conversation[5..];bool allowLegacy=false;
         if(peer!=null)
         {
             var policy=await Mesh.ResolvePrivateMediaPolicy(peer);
@@ -121,16 +121,19 @@ public sealed partial class AppController
             }
             else if(policy!=PrivateMediaSendPolicy.Encrypted)throw new IOException("Encrypted media support could not be authenticated; no attachment was sent");
         }
-        string id=(peer==null?null:PrivateMediaIdentity.StableId(Mesh.Id,peer,media.Name))??VoiceBurstId(media.Name)??Guid.NewGuid().ToString();
+        cancellation.ThrowIfCancellationRequested();string id=(peer==null?null:PrivateMediaIdentity.StableId(Mesh.Id,peer,media.Name))??VoiceBurstId(media.Name)??Guid.NewGuid().ToString();
         Add(new(conversation,id,Store.State.Nickname,media.Name,Bytes.Now,true,"sending",Store.SaveMedia(media),media.Mime,peer));
         try
         {
-            await Mesh.SendMedia(media,peer,allowLegacy);
+            UpdateReceipt(id,"sending",conversation);
+            await Mesh.SendMedia(media,peer,allowLegacy,cancellation);
+            cancellation.ThrowIfCancellationRequested();
             // A receipt may have raced local completion. Never downgrade it.
             var message=Store.State.Messages.FirstOrDefault(m=>m.Own&&m.Id==id&&m.Conversation==conversation);
             if(message?.Status=="sending")UpdateReceipt(id,peer==null?"sent":allowLegacy?"sent without encryption":PrivateMediaIdentity.IsStable(id)?"awaiting receipt":"sent",conversation);
         }
-        catch{UpdateReceipt(id,"failed",conversation);throw;}
+        catch(OperationCanceledException) when(cancellation.IsCancellationRequested){await Mesh.ForgetPrivateMedia([id]);UpdateReceipt(id,"canceled",conversation);throw;}
+        catch{await Mesh.ForgetPrivateMedia([id]);UpdateReceipt(id,"failed",conversation);throw;}
     }
 
     public async Task ClearConversation(string conversation)

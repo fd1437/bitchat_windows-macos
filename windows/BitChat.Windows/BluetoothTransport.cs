@@ -23,14 +23,14 @@ public sealed class BluetoothTransport:IDisposable
     private readonly ConcurrentDictionary<string,string> directPeers=new();
     private readonly AuthenticatedLinks authenticatedLinks=new();
     private readonly ConcurrentDictionary<string,byte> peripheralLinks=new();
-    public Guid LinkEpoch(string ingress)=>authenticatedLinks.EnsureOpen(ingress);
+    public Guid LinkEpoch(string ingress)=>authenticatedLinks.Epoch(ingress)??Guid.Empty;
     public AuthenticatedLink[] AuthenticatedFor(string peer)=>authenticatedLinks.For(peer);
     public (string Peer,Guid Epoch)[] DirectRoutes=>directPeers.Select(p=>(Peer:p.Value,Epoch:authenticatedLinks.Epoch(p.Key))).Where(p=>p.Epoch!=null).Select(p=>(p.Peer,p.Epoch!.Value)).ToArray();
     public void RememberAuthenticated(string peer,string ingress,Guid epoch,Guid generation)=>authenticatedLinks.Authenticate(ingress,epoch,peer,generation);
     private readonly ConcurrentDictionary<string,SemaphoreSlim> clientSendGates=new();
     private readonly ConcurrentDictionary<string,SemaphoreSlim> writeReceiveGates=new();
     public byte[][] DirectPeers=>directPeers.Values.Distinct().Select(Convert.FromHexString).ToArray();
-    public void RememberDirectPeer(string ingress,string peer)=>directPeers[ingress]=peer;
+    public void RememberDirectPeer(string ingress,string peer){if(authenticatedLinks.Epoch(ingress)!=null)directPeers[ingress]=peer;}
     private BluetoothLEAdvertisementWatcher? watcher;
     private GattServiceProvider? provider;
     private GattLocalCharacteristic? local;
@@ -117,28 +117,38 @@ public sealed class BluetoothTransport:IDisposable
     }
     private void Receive(PacketStream stream,byte[] bytes,string ingress,Guid epoch)
     {
-        try{lock(stream){foreach(var frame in stream.Add(bytes))Packet?.Invoke(ingress,epoch,frame);}}catch(Exception e){Status?.Invoke("Rejected BLE frame: "+e.Message);}
+        try{if(authenticatedLinks.Epoch(ingress)!=epoch)return;lock(stream){foreach(var frame in stream.Add(bytes))Packet?.Invoke(ingress,epoch,frame);}}catch(Exception e){Status?.Invoke("Rejected BLE frame: "+e.Message);}
     }
-    public async Task<int> Send(MeshPacket packet)
+    public Task<int> Send(MeshPacket packet)=>Send(packet,CancellationToken.None);
+    public async Task<int> Send(MeshPacket packet,CancellationToken cancellation)
     {
         try
         {
-            var tasks=links.Values.Select(link=>SendCentral(link,packet)).ToList();
-            if(local!=null)tasks.AddRange(local.SubscribedClients.ToArray().Select(client=>SendPeripheral(client,packet)));
-            return (await Task.WhenAll(tasks)).Count(accepted=>accepted);
+            cancellation.ThrowIfCancellationRequested();
+            // An authenticated direct route avoids flooding large private files
+            // onto unrelated radios. Fall back to mesh only if every route fails.
+            if(packet.Type is 0x11 or 0x22&&packet.Recipient is {} recipient)
+            {
+                foreach(var route in authenticatedLinks.For(Bytes.Hex(recipient)))
+                {cancellation.ThrowIfCancellationRequested();if(await SendDirect(packet,route,cancellation)>0)return 1;}
+            }
+            var tasks=links.Values.Select(link=>SendCentral(link,packet,cancellation:cancellation)).ToList();
+            if(local!=null)tasks.AddRange(local.SubscribedClients.ToArray().Select(client=>SendPeripheral(client,packet,cancellation:cancellation)));
+            var results=await Task.WhenAll(tasks);cancellation.ThrowIfCancellationRequested();return results.Count(accepted=>accepted);
         }
         finally{SendFinished?.Invoke(packet);}
     }
-    public async Task<int> SendDirect(MeshPacket packet,AuthenticatedLink lease)
+    public Task<int> SendDirect(MeshPacket packet,AuthenticatedLink lease)=>SendDirect(packet,lease,CancellationToken.None);
+    private async Task<int> SendDirect(MeshPacket packet,AuthenticatedLink lease,CancellationToken cancellation)
     {
         bool Valid()=>authenticatedLinks.Current(lease);
         if(!Valid())return 0;
         foreach(var pair in links)
-            if(pair.Key.ToString("x")==lease.Ingress&&pair.Value.Epoch==lease.Epoch)return await SendCentral(pair.Value,packet,Valid)?1:0;
+            if(pair.Key.ToString("x")==lease.Ingress&&pair.Value.Epoch==lease.Epoch)return await SendCentral(pair.Value,packet,Valid,cancellation)?1:0;
         var client=local?.SubscribedClients.FirstOrDefault(c=>c.Session.DeviceId.Id==lease.Ingress);
-        return client!=null&&await SendPeripheral(client,packet,Valid)?1:0;
+        return client!=null&&await SendPeripheral(client,packet,Valid,cancellation)?1:0;
     }
-    private async Task<bool> SendCentral(Link link,MeshPacket packet,Func<bool>? stillValid=null)
+    private async Task<bool> SendCentral(Link link,MeshPacket packet,Func<bool>? stillValid=null,CancellationToken cancellation=default)
     {
         try
         {
@@ -150,12 +160,14 @@ public sealed class BluetoothTransport:IDisposable
             var frames=FragmentAssembler.Split(packet,BleFraming.CentralFrameLimit(mtu)).Select(part=>(Part:part,Bytes:part.Encode(part.Type is 0x10 or 0x11))).ToArray();long total=frames.Sum(frame=>(long)frame.Bytes.Length),written=0;
             foreach(var frame in frames)
             {
-                if(link.Retired!=0||stillValid!=null&&!stillValid())return false;
-                await link.Gate.WaitAsync(stop.Token);
+                cancellation.ThrowIfCancellationRequested();if(link.Retired!=0||stillValid!=null&&!stillValid())return false;
+                await link.Gate.WaitAsync(cancellation);
                 try
                 {
                 var encoded=frame.Bytes;GattCommunicationStatus status;
                 using var deadline=CancellationTokenSource.CreateLinkedTokenSource(stop.Token);deadline.CancelAfter(TimeSpan.FromSeconds(30));
+                try
+                {
                 if(encoded.Length<=mtu)
                     status=await link.Characteristic.WriteValueAsync(Buffer(encoded),GattWriteOption.WriteWithResponse).AsTask(deadline.Token);
                 else
@@ -163,17 +175,20 @@ public sealed class BluetoothTransport:IDisposable
                     var transaction=new GattReliableWriteTransaction();transaction.WriteValue(link.Characteristic,Buffer(encoded));
                     status=await transaction.CommitAsync().AsTask(deadline.Token);
                 }
+                }
+                catch(OperationCanceledException) when(!stop.IsCancellationRequested){throw new TimeoutException("Bluetooth frame timed out");}
                 if(status!=GattCommunicationStatus.Success)throw new IOException(status.ToString());
                 written+=encoded.Length;SendProgress?.Invoke(packet,written,total);
                 }
                 finally{link.Gate.Release();}
                 await Task.Yield();
             }
-            return stillValid==null||stillValid();
+            cancellation.ThrowIfCancellationRequested();return stillValid==null||stillValid();
         }
+        catch(OperationCanceledException) when(cancellation.IsCancellationRequested){throw;}
         catch(Exception e){Retire(link,"BLE send failed; reconnecting: "+e.Message);return false;}
     }
-    private async Task<bool> SendPeripheral(GattSubscribedClient client,MeshPacket packet,Func<bool>? stillValid=null)
+    private async Task<bool> SendPeripheral(GattSubscribedClient client,MeshPacket packet,Func<bool>? stillValid=null,CancellationToken cancellation=default)
     {
         string clientKey=client.Session.DeviceId.Id;Guid epoch=authenticatedLinks.EnsureOpen(clientKey);
         bool Valid()=>!stop.IsCancellationRequested&&authenticatedLinks.Epoch(clientKey)==epoch&&(stillValid==null||stillValid());
@@ -184,14 +199,16 @@ public sealed class BluetoothTransport:IDisposable
             var frames=FragmentAssembler.Split(packet,512).Select(part=>part.Encode(part.Type is 0x10 or 0x11)).ToArray();long total=frames.Sum(frame=>(long)frame.Length),written=0;
             foreach(var encoded in frames)
             {
-                await clientGate.WaitAsync(stop.Token);
+                cancellation.ThrowIfCancellationRequested();await clientGate.WaitAsync(cancellation);
                 try
                 {
                 foreach(var bytes in BleFraming.Chunks(encoded,mtu))
                 {
                     if(!Valid())return false;
                     using var deadline=CancellationTokenSource.CreateLinkedTokenSource(stop.Token);deadline.CancelAfter(TimeSpan.FromSeconds(30));
-                    var result=await local!.NotifyValueAsync(Buffer(bytes),client).AsTask(deadline.Token);
+                    GattClientNotificationResult result;
+                    try{result=await local!.NotifyValueAsync(Buffer(bytes),client).AsTask(deadline.Token);}
+                    catch(OperationCanceledException) when(!stop.IsCancellationRequested){throw new TimeoutException("Bluetooth notification frame timed out");}
                     if(result.Status!=GattCommunicationStatus.Success)throw new IOException(result.Status.ToString());
                     written+=bytes.Length;SendProgress?.Invoke(packet,written,total);
                 }
@@ -199,9 +216,10 @@ public sealed class BluetoothTransport:IDisposable
                 finally{clientGate.Release();}
                 await Task.Yield();
             }
-            return Valid();
+            cancellation.ThrowIfCancellationRequested();return Valid();
         }
-        catch(Exception e){Status?.Invoke("BLE notify: "+e.Message);return false;}
+        catch(OperationCanceledException) when(cancellation.IsCancellationRequested){throw;}
+        catch(Exception e){authenticatedLinks.Close(clientKey,epoch);directPeers.TryRemove(clientKey,out _);Status?.Invoke("BLE notify failed; route expired: "+e.Message);return false;}
     }
     private async Task CheckDisconnect(Link link)
     {

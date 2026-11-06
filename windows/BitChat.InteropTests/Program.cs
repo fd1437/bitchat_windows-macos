@@ -251,4 +251,5 @@ await macSession.SendPrivate(restartedPc.Id,"message after PC restart","restart-
 while(privateTransit.Count>0){if(--restartBudget==0)throw new Exception("Restart message loop");var item=privateTransit[0];privateTransit.RemoveAt(0);await(item.ToReceiver?restartedPc:macSession).Receive(item.Packet.Encode());}
 Check(restartedReceived.Count==1&&restartedReceived[0].Id=="restart-private-1","Renegotiated Mac session can deliver the previously unacknowledged private message");
 await IdentityAndTransferTests.Run(Check);
+await SendQueueTests.Run(Check);
 Console.WriteLine($"TOTAL {passed} checks passed");

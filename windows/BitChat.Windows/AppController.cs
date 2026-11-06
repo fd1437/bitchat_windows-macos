@@ -28,12 +28,12 @@ public sealed partial class AppController:IAsyncDisposable
     public AppController(StateStore store)
     {
         Store=store;bridgeCourier=new(store.State.BridgeDrops,snapshot=>Post(()=>{if(snapshot.Revision>=Store.State.BridgeDrops.Revision){Store.State.BridgeDrops=snapshot;Store.Save();}}));ConfigureCourierBridge();mediaLedger=new(Path.Combine(StateStore.Root,"media"),ProtectMediaDecision,UnprotectMediaDecision);Mesh=new(store.State.NoiseKey,store.State.SigningSeed,store.State.Nickname,Bluetooth.Send){Capabilities=[0x79,0x03],IsBlocked=id=>Store.State.Blocked.Contains(id),BatteryPercent=()=>Store.State.ShareBattery?LocalBatteryPercent():null};
-        Mesh.MediaSending+=TrackMediaSend;Bluetooth.SendProgress+=ReportMediaSend;Bluetooth.SendFinished+=packet=>trackedSends.TryRemove(packet,out _);
+        Mesh.SendMediaPacket=Bluetooth.Send;Mesh.MediaSending+=TrackMediaSend;Bluetooth.SendProgress+=ReportMediaSend;Bluetooth.SendFinished+=packet=>trackedSends.TryRemove(packet,out _);
         foreach(var pair in Store.State.KnownPeers){Peers[pair.Key]=pair.Value with{LastSeen=0,Authenticated=false};Mesh.RestorePeer(pair.Value);}
         foreach(var pair in Store.State.PinnedSigningKeys)Mesh.RestorePinnedKey(pair.Key,pair.Value);
         Mesh.RestoreArchive(Store.State.GossipArchive);
         Mesh.IdentityAuthenticated+=(peer,key)=>Post(()=>{Store.State.PinnedSigningKeys[peer]=key;Store.Save();});
-        Bluetooth.Status+=s=>Status?.Invoke(s);Bluetooth.Packet+=(ingress,epoch,b)=>_=Mesh.Receive(b,ingress,epoch);Mesh.LinkAuthenticated+=Bluetooth.RememberAuthenticated;Mesh.DirectNeighbors=()=>Bluetooth.DirectPeers;Mesh.IngressPeerValidated+=(ingress,peer)=>{Bluetooth.RememberDirectPeer(ingress,peer);var epoch=Bluetooth.LinkEpoch(ingress);_=Mesh.PeerLinkReady(peer,epoch);if(Store.State.Bridge||Store.State.Favorites.Contains(peer)&&Store.State.FavoritedBy.Contains(peer))_=Mesh.ProveDirectLink(peer,epoch,Bluetooth.AuthenticatedFor(peer).Select(l=>l.Epoch).ToArray());};Bluetooth.LinkReady+=()=>_=OnLinkReady();
+        Bluetooth.Status+=s=>Status?.Invoke(s);Bluetooth.Packet+=(ingress,epoch,b)=>_=Mesh.Receive(b,ingress,epoch);Mesh.LinkAuthenticated+=Bluetooth.RememberAuthenticated;Mesh.DirectNeighbors=()=>Bluetooth.DirectPeers;Mesh.IngressPeerValidated+=(ingress,peer)=>{Bluetooth.RememberDirectPeer(ingress,peer);var epoch=Bluetooth.LinkEpoch(ingress);if(epoch==Guid.Empty)return;_=Mesh.PeerLinkReady(peer,epoch);_=Mesh.ProveDirectLink(peer,epoch,Bluetooth.AuthenticatedFor(peer).Select(l=>l.Epoch).ToArray());};Bluetooth.LinkReady+=()=>_=OnLinkReady();
         Mesh.Status+=s=>Status?.Invoke(s);Mesh.PeerChanged+=p=>{Peers[p.Id]=p;Post(()=>{Store.State.KnownPeers[p.Id]=p;Store.Save();});PeersChanged?.Invoke();};
         Mesh.Message+=m=>Post(()=>{if(m.IsPrivate&&HandleFavorite(m.PeerId!,m.Content))return;Add(new(m.IsPrivate?"mesh:"+m.PeerId:"mesh",m.Id,m.Sender,m.Content,m.Timestamp,Peer:m.PeerId));});
         Mesh.Media+=(peer,media,isPrivate)=>Post(()=>ReceiveRawMedia(peer,media,isPrivate));
@@ -53,7 +53,7 @@ public sealed partial class AppController:IAsyncDisposable
         maintenance=Task.Run(async()=>
         {
             using var timer=new PeriodicTimer(TimeSpan.FromSeconds(15));
-            try{while(await timer.WaitForNextTickAsync(stop.Token)){Bluetooth.Maintain();await Mesh.Announce();if(Bluetooth.Connections>0&&trackedSends.IsEmpty)await Mesh.RequestSync();Post(()=>_=MaintainOnUi());PeersChanged?.Invoke();}}catch(OperationCanceledException){}
+            try{while(await timer.WaitForNextTickAsync(stop.Token)){try{Bluetooth.Maintain();await Mesh.Announce();if(Bluetooth.Connections>0&&trackedSends.IsEmpty)await Mesh.RequestSync();Post(()=>_=MaintainOnUi());PeersChanged?.Invoke();}catch(Exception error) when(!stop.IsCancellationRequested){Status?.Invoke("Connection maintenance: "+error.Message);}}}catch(OperationCanceledException){}
         });
         if(Store.State.UseTor){tor=new();tor.Status+=s=>Status?.Invoke(s);Relays.Proxy=await tor.Start(stop.Token);}
         Relays.Start(Store.State.Relays);
@@ -161,11 +161,11 @@ public sealed partial class AppController:IAsyncDisposable
         string name=mime=="image/jpeg"?"img_"+Guid.NewGuid().ToString().ToUpperInvariant()+".jpg":mime=="audio/mp4"?"voice_"+Guid.NewGuid().ToString().ToUpperInvariant()+".m4a":file.Name;
         return new(name,mime,await File.ReadAllBytesAsync(path));
     }
-    public Task SendPreparedMedia(string conversation,MediaPacket media)
+    public Task SendPreparedMedia(string conversation,MediaPacket media,CancellationToken cancellation=default)
     {
         if(conversation!="mesh"&&!conversation.StartsWith("mesh:"))throw new InvalidOperationException("Files are available in Bluetooth conversations");
-        if(Bluetooth.Connections==0)throw new IOException("No Bluetooth link is available; your attachment remains in the draft");
-        return SendAttachment(conversation,media);
+        if(Bluetooth.Connections==0)throw new IOException("No Bluetooth link is available; retry the attachment from transfers");
+        return SendAttachment(conversation,media,cancellation);
     }
     private async Task Observe(Func<Task> action){try{await action();}catch(Exception e){Status?.Invoke(e.Message);}}
     private byte[] ReplyKey(string peer)

@@ -15,15 +15,22 @@ public sealed partial class MainWindow
     private readonly List<DraftAttachment> draftAttachments=[];
     private readonly WrapPanel draftPanel=new(){Margin=new Thickness(6,4,6,0)};
     private Button? recordButton;
-    private readonly ProgressBar fileSendProgress=new(){Minimum=0,Maximum=100,Height=6,Margin=new Thickness(10,5,10,2),Visibility=Visibility.Collapsed};
-    private readonly TextBlock fileSendLabel=new(){Margin=new Thickness(10,2,10,5),FontSize=11,Visibility=Visibility.Collapsed};
+    private sealed class FileTransfer(DraftAttachment attachment)
+    {
+        public DraftAttachment Attachment=attachment;public CancellationTokenSource Stop=new();
+        public string State="queued";public int Percent;public bool Finished;
+    }
+    private readonly List<FileTransfer> transfers=[];
+    private readonly CorrespondentSendQueue sendQueue=new();
+    private readonly StackPanel transferRows=new();
+    private readonly ScrollViewer transferPanel=new(){MaxHeight=165,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,Visibility=Visibility.Collapsed};
     private readonly Dictionary<DraftAttachment,string> draftStates=[];
     private readonly Dictionary<DraftAttachment,TextBlock> draftLabels=[];
-    private DraftAttachment? currentAttachment;
-    private int batchSize,batchCompleted;
+    private StackPanel? composerTools;
+    private Grid? composerTextArea;
     private Border CreateComposer()
     {
-        var content=new StackPanel();content.Children.Add(draftPanel);content.Children.Add(fileSendProgress);fileSendLabel.Foreground=muted;content.Children.Add(fileSendLabel);
+        var content=new StackPanel();content.Children.Add(draftPanel);
         input.Background=Brushes.Transparent;input.Foreground=Foreground;input.CaretBrush=green;input.BorderThickness=new Thickness(0);input.Padding=new Thickness(14,12,14,12);input.MinHeight=56;
         input.ToolTip="Write a message · Shift+Enter for a new line · Ctrl+V to attach files or an image";
         input.TextChanged+=(_,_)=>ComposerChanged();
@@ -35,17 +42,20 @@ public sealed partial class MainWindow
         DataObject.AddPastingHandler(input,(_,e)=>{if(e.DataObject.GetDataPresent(DataFormats.FileDrop)||e.DataObject.GetDataPresent(DataFormats.Bitmap)){e.CancelCommand();TryPasteAttachments();}});
         input.AllowDrop=true;input.PreviewDragOver+=(_,e)=>{if(e.Data.GetDataPresent(DataFormats.FileDrop)){e.Effects=DragDropEffects.Copy;e.Handled=true;}};
         input.PreviewDrop+=(_,e)=>{if(e.Data.GetData(DataFormats.FileDrop) is string[] paths){e.Handled=true;_=Guard(()=>StageFiles(paths));}};
-        var textArea=new Grid();textArea.Children.Add(input);var placeholder=new TextBlock{Text="Write a message, paste files, or record a voice note…",Foreground=muted,Margin=new Thickness(14,13,14,0),IsHitTestVisible=false};textArea.Children.Add(placeholder);input.TextChanged+=(_,_)=>placeholder.Visibility=input.Text.Length==0?Visibility.Visible:Visibility.Collapsed;content.Children.Add(textArea);
+        var textArea=new Grid();composerTextArea=textArea;textArea.Children.Add(input);var placeholder=new TextBlock{Text="Write a message, paste files, or record a voice note…",Foreground=muted,Margin=new Thickness(14,13,14,0),IsHitTestVisible=false};textArea.Children.Add(placeholder);input.TextChanged+=(_,_)=>placeholder.Visibility=input.Text.Length==0?Visibility.Visible:Visibility.Collapsed;content.Children.Add(textArea);
         var toolbar=new DockPanel{Margin=new Thickness(6,0,6,6)};
         var send=Button("Send  ↵",async()=>await Send());send.MinWidth=92;send.Background=green;send.Foreground=Brushes.White;DockPanel.SetDock(send,Dock.Right);toolbar.Children.Add(send);
-        var tools=new StackPanel{Orientation=Orientation.Horizontal};
+        var tools=new StackPanel{Orientation=Orientation.Horizontal};composerTools=tools;
         var attach=Button("＋  Files",async()=>await Attach());attach.ToolTip="Add files to the draft";tools.Children.Add(attach);
         recordButton=Button("●  Record",async()=>await Guard(async()=>{if(controller.IsRecording)await controller.EndVoice(false);else await controller.BeginVoice(conversation,false);recordButton!.Content=controller.IsRecording?"■  Stop":"●  Record";}));tools.Children.Add(recordButton);
         var ptt=Button("Hold to talk",()=>{});ptt.ToolTip="Live voice · hold to broadcast immediately";
         ptt.PreviewMouseLeftButtonDown+=async(_,e)=>{e.Handled=true;ptt.CaptureMouse();await Guard(()=>controller.BeginVoice(conversation,true));};
         ptt.PreviewMouseLeftButtonUp+=async(_,e)=>{e.Handled=true;ptt.ReleaseMouseCapture();await Guard(()=>controller.EndVoice(false));};tools.Children.Add(ptt);
         toolbar.Children.Add(tools);content.Children.Add(toolbar);
-        return new Border{Background=panel,CornerRadius=new CornerRadius(store.State.HackMode?0:14),BorderBrush=new SolidColorBrush(Color.FromArgb(50,128,128,128)),BorderThickness=new Thickness(1),Child=content,Margin=new Thickness(0,12,0,0)};
+        var container=new Border{Background=panel,CornerRadius=new CornerRadius(store.State.HackMode?0:14),BorderBrush=new SolidColorBrush(Color.FromArgb(50,128,128,128)),BorderThickness=new Thickness(1),Child=content,Margin=new Thickness(0,12,0,0)};
+        container.AllowDrop=true;container.PreviewDragOver+=(_,e)=>{if(e.Data.GetDataPresent(DataFormats.FileDrop)){e.Effects=DragDropEffects.Copy;e.Handled=true;}};
+        container.PreviewDrop+=(_,e)=>{if(e.Data.GetData(DataFormats.FileDrop) is string[] paths){e.Handled=true;_=Guard(()=>StageFiles(paths));}};
+        return container;
     }
     private async Task Attach()
     {
@@ -65,6 +75,7 @@ public sealed partial class MainWindow
     private void AddDraft(string target,MediaPacket media)
     {
         if(media.Content.Length>MediaPacket.MaxBytes)throw new InvalidDataException("Each attachment must be at most 1 MiB");
+        if(store.State.FilesOnly&&!IsPrivateConversation(target))throw new InvalidOperationException("Choose a Bluetooth correspondent first");
         if(draftAttachments.Count>=16||draftAttachments.Sum(item=>item.Media.Content.Length)+media.Content.Length>8*1024*1024)throw new InvalidDataException("Draft limit: 16 files / 8 MiB");
         draftAttachments.Add(new(target,media));RefreshDraft();
     }
@@ -74,7 +85,7 @@ public sealed partial class MainWindow
         foreach(var item in draftAttachments.Where(item=>item.Conversation==conversation).ToArray())
         {
             var row=new DockPanel{Width=220};
-            var remove=Button("×",()=>{draftAttachments.Remove(item);draftStates.Remove(item);RefreshDraft();});remove.IsEnabled=!sending;remove.MinWidth=28;DockPanel.SetDock(remove,Dock.Right);row.Children.Add(remove);
+            var remove=Button("×",()=>{draftAttachments.Remove(item);draftStates.Remove(item);RefreshDraft();});remove.MinWidth=28;DockPanel.SetDock(remove,Dock.Right);row.Children.Add(remove);
             if(item.Media.Mime.StartsWith("image/"))
             {
                 try{using var stream=new MemoryStream(item.Media.Content);var bitmap=new BitmapImage();bitmap.BeginInit();bitmap.CacheOption=BitmapCacheOption.OnLoad;bitmap.DecodePixelWidth=48;bitmap.StreamSource=stream;bitmap.EndInit();bitmap.Freeze();var image=new Image{Source=bitmap,Width=42,Height=42,Margin=new Thickness(0,0,8,0),Stretch=Stretch.UniformToFill};DockPanel.SetDock(image,Dock.Left);row.Children.Add(image);}catch{}
@@ -85,15 +96,48 @@ public sealed partial class MainWindow
         draftPanel.Visibility=draftPanel.Children.Count==0?Visibility.Collapsed:Visibility.Visible;
     }
     private string DraftLabel(DraftAttachment item)=>item.Media.Name+"\n"+(item.Media.Content.Length/1024d).ToString("0.#")+" KB · "+draftStates.GetValueOrDefault(item,"ready to send");
-    private void BeginFileBatch(int count)
-    {batchSize=count;batchCompleted=0;fileSendProgress.Visibility=fileSendLabel.Visibility=count>0?Visibility.Visible:Visibility.Collapsed;fileSendProgress.Value=0;}
+    private void RefreshTransfers()
+    {
+        transferRows.Children.Clear();transferPanel.Content=transferRows;
+        foreach(var item in transfers.Where(t=>t.Attachment.Conversation==conversation).ToArray())
+        {
+            var row=new DockPanel{Margin=new Thickness(4)};
+            if(item.Finished&&item.State.StartsWith("failed"))
+            {var retry=Button("Retry",()=>{item.Stop.Dispose();item.Stop=new();item.State="queued";item.Percent=0;item.Finished=false;_=RunTransfer(item);RefreshTransfers();});DockPanel.SetDock(retry,Dock.Right);row.Children.Add(retry);}
+            var action=Button(item.Finished?"Remove":"Cancel",()=>
+            {
+                if(item.Finished){transfers.Remove(item);item.Stop.Dispose();}
+                else{item.Stop.Cancel();item.State=item.State=="queued"?"canceled · this queued file will not be sent":"canceling after current Bluetooth frame…";}
+                RefreshTransfers();
+            });DockPanel.SetDock(action,Dock.Right);row.Children.Add(action);
+            var details=new StackPanel();details.Children.Add(new TextBlock{Text=item.Attachment.Media.Name+" · "+item.State,Foreground=Foreground,TextTrimming=TextTrimming.CharacterEllipsis});
+            details.Children.Add(new ProgressBar{Minimum=0,Maximum=100,Value=item.Percent,Height=4,Margin=new Thickness(0,5,8,0)});row.Children.Add(details);transferRows.Children.Add(row);
+        }
+        transferPanel.Visibility=transferRows.Children.Count==0?Visibility.Collapsed:Visibility.Visible;
+    }
     private void ShowFileProgress(AppController.FileSendProgress progress)
     {
         if(receiptLabels.TryGetValue(progress.Id,out var receipt)&&store.State.Messages.Any(m=>m.Id==progress.Id&&m.Own&&m.Status=="sending"))receipt.Text=$"Sending {progress.Percent}%";
-        if(currentAttachment is not {} item||item.Conversation!=progress.Conversation||item.Media.Name!=progress.Name)return;
-        draftStates[item]=$"sending {progress.Percent}%";if(draftLabels.TryGetValue(item,out var label))label.Text=DraftLabel(item);
-        fileSendProgress.Value=batchSize==0?0:100d*(batchCompleted+progress.Percent/100d)/batchSize;
-        fileSendLabel.Text=$"File {batchCompleted+1}/{batchSize} · {progress.Name} · {progress.Percent}%";
+        var item=transfers.FirstOrDefault(t=>!t.Finished&&t.State.StartsWith("sending")&&t.Attachment.Conversation==progress.Conversation&&t.Attachment.Media.Name==progress.Name);
+        if(item==null||item.Stop.IsCancellationRequested)return;item.Percent=progress.Percent;item.State=$"sending {progress.Percent}%";RefreshTransfers();
+    }
+    private void CancelTransfers(string? target=null)
+    {
+        foreach(var item in transfers.Where(t=>target==null||t.Attachment.Conversation==target))item.Stop.Cancel();
+        draftAttachments.RemoveAll(draft=>target==null||draft.Conversation==target);RefreshDraft();RefreshTransfers();
+    }
+    private async Task RunTransfer(FileTransfer item)
+    {
+        var sender=controller;
+        try
+        {
+            await sendQueue.Enqueue(item.Attachment.Conversation,async cancellation=>
+            {item.State="sending 0%";RefreshTransfers();await sender.SendPreparedMedia(item.Attachment.Conversation,item.Attachment.Media,cancellation);},item.Stop.Token);
+            item.Percent=100;item.State="transmitted · see delivery receipt";
+        }
+        catch(OperationCanceledException) when(item.Stop.IsCancellationRequested){item.State="canceled · received data cannot be recalled";}
+        catch(Exception error){item.State="failed · "+error.Message;}
+        finally{item.Finished=true;RefreshTransfers();}
     }
     private bool TryPasteAttachments()
     {
@@ -111,35 +155,37 @@ public sealed partial class MainWindow
         catch(Exception error){status.Text="Paste: "+error.Message;return true;}
         return false;
     }
-    private bool sending;
+    private bool preparingSend;
     private async Task Send()
     {
-        if(sending){status.Text="A batch is already sending · additional files remain in the draft for the next Send";return;}sending=true;
+        if(preparingSend)return;preparingSend=true;
         try
         {
+            string target=conversation;
+            if(store.State.FilesOnly&&!IsPrivateConversation(target)){status.Text="Choose a correspondent to send files";return;}
             if(controller.IsRecording){await controller.EndVoice(false);if(recordButton!=null)recordButton.Content="●  Record";}
-            string target=conversation,original=input.Text,text=original.Trim();var attachments=draftAttachments.Where(item=>item.Conversation==target).ToArray();
+            string original=input.Text,text=store.State.FilesOnly?"":original.Trim();
+            var attachments=draftAttachments.Where(item=>item.Conversation==target).ToArray();
             if(text.Length==0&&attachments.Length==0)return;
+            if(transfers.Count(t=>!t.Finished)+attachments.Length>32||transfers.Sum(t=>t.Attachment.Media.Content.Length)+attachments.Sum(t=>t.Media.Content.Length)>16*1024*1024)
+            {status.Text="Transfer limit reached · remove completed transfers first";return;}
+            // Snapshot and detach the accepted batch before any radio I/O.
+            foreach(var attachment in attachments)
+            {draftAttachments.Remove(attachment);draftStates.Remove(attachment);var item=new FileTransfer(attachment);transfers.Add(item);_=RunTransfer(item);}
+            RefreshDraft();RefreshTransfers();
             if(text.Length>0)
             {
-                if(text.StartsWith('/'))await Command(text);else await controller.Send(target,text);
                 SendTyping(false);if(conversation==target&&input.Text==original)input.Clear();
+                _=SendCapturedText(target,text);
             }
-            int sent=0,failed=0;BeginFileBatch(attachments.Length);
-            await AttachmentBatch.Run(attachments,async attachment=>
-            {
-                currentAttachment=attachment;draftStates[attachment]="connecting…";RefreshDraft();fileSendLabel.Text=$"File {batchCompleted+1}/{batchSize} · {attachment.Media.Name} · preparing…";
-                await controller.SendPreparedMedia(target,attachment.Media);
-            },(attachment,error)=>
-            {
-                if(error==null){draftAttachments.Remove(attachment);draftStates.Remove(attachment);sent++;}
-                else{failed++;draftStates[attachment]="failed · retry with Send";status.Text=attachment.Media.Name+": "+error.Message;}
-                currentAttachment=null;batchCompleted++;RefreshDraft();fileSendProgress.Value=100d*batchCompleted/batchSize;
-            });
-            if(attachments.Length>0){fileSendLabel.Text=$"{sent} file(s) transmitted · {failed} failed";status.Text=failed>0?$"{sent} transmitted · {failed} remain in the draft for retry":"Files transmitted · private delivery receipts appear on each message when supported";}
         }
         catch(Exception error){status.Text=error.Message;}
-        finally{sending=false;currentAttachment=null;RefreshDraft();}
+        finally{preparingSend=false;}
+    }
+    private async Task SendCapturedText(string target,string text)
+    {
+        try{if(text.StartsWith('/'))await Command(text);else await controller.Send(target,text);}
+        catch(Exception error){status.Text="Message failed: "+error.Message;}
     }
     internal void VerifyDraftStaging()
     {
@@ -151,12 +197,28 @@ public sealed partial class MainWindow
     }
     internal void VerifyFileProgress()
     {
-        for(int i=0;i<3;i++)AddDraft(conversation,new($"batch-{i}.txt","text/plain",Bytes.Utf8("synthetic draft")));
-        if(draftPanel.Children.Count!=3)throw new InvalidOperationException("Multiple files were not staged");
-        currentAttachment=draftAttachments[0];BeginFileBatch(3);batchCompleted=1;
-        ShowFileProgress(new(conversation,"diagnostic-progress",currentAttachment.Media.Name,50));
-        if(!fileSendProgress.IsVisible||!fileSendLabel.IsVisible||Math.Abs(fileSendProgress.Value-50)>.01||!fileSendLabel.Text.Contains("50%")||!draftLabels[currentAttachment].Text.Contains("50%"))throw new InvalidOperationException("File progress is not visible in the composer");
-        currentAttachment=null;batchSize=batchCompleted=0;draftAttachments.Clear();draftStates.Clear();RefreshDraft();fileSendProgress.Visibility=fileSendLabel.Visibility=Visibility.Collapsed;
+        var attachment=new DraftAttachment(conversation,new("batch-test.txt","text/plain",Bytes.Utf8("synthetic transfer")));
+        var item=new FileTransfer(attachment){State="sending 0%"};transfers.Add(item);
+        ShowFileProgress(new(conversation,"diagnostic-progress",attachment.Media.Name,50));
+        if(item.Percent!=50||!item.State.Contains("50%")||transferRows.Children.Count!=1||draftAttachments.Contains(attachment))throw new InvalidOperationException("Transfer progress must be outside the draft");
+        item.Stop.Cancel();ShowFileProgress(new(conversation,"diagnostic-progress",attachment.Media.Name,90));
+        if(item.Percent!=50)throw new InvalidOperationException("Canceled transfer accepted late progress");
+        transfers.Remove(item);item.Stop.Dispose();RefreshTransfers();
+        bool previous=store.State.FilesOnly;store.State.FilesOnly=true;ApplyFilesOnlyMode();
+        if(input.IsEnabled||composerTools?.Children.Cast<UIElement>().Skip(1).Any(child=>child.IsEnabled)==true)throw new InvalidOperationException("Files-only mode exposes chat or voice controls");
+        store.State.FilesOnly=previous;ApplyFilesOnlyMode();
+    }
+    internal async Task VerifyTransferSnapshot()
+    {
+        int before=store.State.Messages.Count;
+        AddDraft(conversation,new("snapshot-a.txt","text/plain",Bytes.Utf8("synthetic A")));
+        AddDraft(conversation,new("snapshot-b.txt","text/plain",Bytes.Utf8("synthetic B")));
+        await Send();
+        if(draftAttachments.Count!=0||transfers.Count!=2||transferRows.Children.Count!=2)throw new InvalidOperationException("Send must detach the whole selected batch before radio I/O");
+        CancelTransfers();
+        long until=Bytes.Now+2000;while(transfers.Any(item=>!item.Finished)&&Bytes.Now<until)await Task.Delay(10);
+        if(transfers.Any(item=>!item.Finished)||store.State.Messages.Count!=before)throw new InvalidOperationException("Canceled queued files were sent or left blocked");
+        foreach(var item in transfers)item.Stop.Dispose();transfers.Clear();RefreshTransfers();
     }
     internal void PrepareVisualDiagnostics()
     {

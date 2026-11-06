@@ -14,7 +14,7 @@ public sealed record CarriedEnvelope(CourierEnvelope Envelope,string Depositor,l
 
 public sealed partial class AppController
 {
-    private long lastPrekeys;private bool maintaining;
+    private long lastPrekeys;private bool maintaining,depositing;
     public async Task PublishPrekeys(bool force=false)
     {
         if(!force&&Bytes.Now-lastPrekeys<60000)return;
@@ -37,13 +37,26 @@ public sealed partial class AppController
     {
         if(Bytes.Utf8(text).Length>255)throw new ArgumentException("Mesh private messages accept at most 255 UTF-8 bytes");
         if(Store.State.Outbox.Count>=256)throw new IOException("Private outbox is full");
-        Store.State.Outbox.Add(new(){Peer=peer,Id=id,Text=text,LastAttempt=Bytes.Now});Store.Save();if(Bluetooth.Connections>0&&Peers.TryGetValue(peer,out var target)&&target.LastSeen>Bytes.Now-60000)await Mesh.SendPrivate(peer,text,id);await DepositOutbox();
+        Store.State.Outbox.Add(new(){Peer=peer,Id=id,Text=text,LastAttempt=Bytes.Now});Store.Save();
+        // Durable acceptance returns immediately: radio failures are retried by
+        // the outbox, never allowed to hold the composer or another recipient.
+        _=AttemptPrivateNow(peer,id,text);_=DepositOutbox();await Task.CompletedTask;
+    }
+    private async Task AttemptPrivateNow(string peer,string id,string text)
+    {
+        try{if(Bluetooth.Connections>0&&Peers.TryGetValue(peer,out var target)&&target.LastSeen>Bytes.Now-60000)await Mesh.SendPrivate(peer,text,id);}
+        catch(Exception error){Status?.Invoke("Private send to "+peer+": "+error.Message);}
     }
     private async Task DepositOutbox()
     {
+        if(depositing||disposed)return;depositing=true;
+        try
+        {
         var couriers=Peers.Values.Where(p=>p.LastSeen>Bytes.Now-60000&&p.Authenticated&&Store.State.Favorites.Contains(p.Id)&&Store.State.FavoritedBy.Contains(p.Id)).ToArray();
         foreach(var pending in Store.State.Outbox.ToArray())
         {
+            try
+            {
             if(Bytes.Now-pending.Created>86400000){UpdateReceipt(pending.Id,"expired");Store.State.Outbox.Remove(pending);continue;}
             var recipient=Peers.GetValueOrDefault(pending.Peer);byte[]? recipientKey=recipient?.NoiseKey??Store.State.NoiseContacts.GetValueOrDefault(pending.Peer)?.Key;if(recipientKey==null)continue;
             DepositBridgeDrop(pending,recipientKey);
@@ -55,8 +68,10 @@ public sealed partial class AppController
                 if(pending.Envelope.Copies<=1)break;byte given=(byte)(pending.Envelope.Copies/2);var envelope=pending.Envelope with{Copies=given};int links=await Mesh.SendDirected(4,envelope.Encode(),courier.Id);
                 if(links>0){pending.Envelope=pending.Envelope with{Copies=(byte)(pending.Envelope.Copies-given)};pending.DepositedTo.Add(courier.Id);}
             }
+            }catch(Exception error){Status?.Invoke("Delivery to "+pending.Peer+": "+error.Message);}
         }
         Store.Save();
+        }catch(Exception error){Status?.Invoke("Outbox: "+error.Message);}finally{depositing=false;}
     }
     private void ReceiveCourier(string peer,byte[] bytes,bool directVerified=false)
     {

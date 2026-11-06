@@ -45,6 +45,7 @@ public sealed class AppState
     public bool UseTor{get;set;}=false;
     public bool Dark{get;set;}=true;
     public bool HackMode{get;set;}
+    public bool FilesOnly{get;set;}
     public bool Notifications{get;set;}=true;
     public bool HideNotificationPreviews{get;set;}
     public bool NotificationPreviewSettingMigrated{get;set;}

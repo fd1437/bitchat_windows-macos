@@ -10,7 +10,7 @@ public sealed partial class MeshEngine
             if(stopping||IsBlocked(peer)||!peers.ContainsKey(peer))return;
             if(sessions.TryGetValue(peer,out var previous))
             {
-                if(previous.Send!=null&&previous.ProvenCapabilities!=null&&(previous.AuthenticatedEpoch==epoch||authenticatedEpochs?.Contains(previous.AuthenticatedEpoch??Guid.Empty)==true))return;
+                if(previous.Send!=null&&(previous.AuthenticatedEpoch==epoch||authenticatedEpochs?.Contains(previous.AuthenticatedEpoch??Guid.Empty)==true))return;
                 if(previous.ProvenCapabilities==null&&Bytes.Now-previous.Started<30000)return;
             }
             if(sessions.Count>=128&&!sessions.ContainsKey(peer))return;

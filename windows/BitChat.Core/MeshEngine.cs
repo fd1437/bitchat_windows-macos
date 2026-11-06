@@ -87,14 +87,26 @@ public sealed partial class MeshEngine:IDisposable,IAsyncDisposable
     }
     public async Task SendTyped(string peer,byte[] payload)
     {
-        await gate.WaitAsync();try{await SendTypedLocked(peer,payload);}finally{gate.Release();}
+        MeshPacket? outbound=null;
+        await gate.WaitAsync();
+        try
+        {
+            if(IsBlocked(peer))throw new InvalidOperationException("Peer is blocked");
+            if(sessions.TryGetValue(peer,out var session)&&session.Send is NoiseCipher cipher)
+                outbound=Packet(0x11,cipher.Encrypt(payload),peer,payload.Length>60000?(byte)2:(byte)1,false);
+            else await SendTypedLocked(peer,payload);
+        }
+        finally{gate.Release();}
+        // A stalled private write must not freeze receive, other correspondents,
+        // or preparation of the next transfer. Cipher nonces stay serialized.
+        if(outbound!=null&&await send(outbound)==0)throw new IOException("No Bluetooth route accepted the private message");
     }
     private async Task SendTypedLocked(string peer,byte[] payload)
     {
         if(IsBlocked(peer))throw new InvalidOperationException("Peer is blocked");
-        if(sessions.TryGetValue(peer,out var session)&&session.Send is NoiseCipher activeSend){await send(Packet(0x11,activeSend.Encrypt(payload),peer,payload.Length>60000?(byte)2:(byte)1,false));return;}
+        if(sessions.TryGetValue(peer,out var session)&&session.Send is NoiseCipher activeSend){if(await send(Packet(0x11,activeSend.Encrypt(payload),peer,payload.Length>60000?(byte)2:(byte)1,false))==0)throw new IOException("No Bluetooth route accepted the private message");return;}
         if(!pending.TryGetValue(peer,out var list))pending[peer]=list=[];
-        if(list.Count>=64)throw new IOException("Private send queue is full");list.Add(payload);
+        if(!list.Any(item=>item.SequenceEqual(payload))){if(list.Count>=64)throw new IOException("Private send queue is full");list.Add(payload);}
         if(session==null||Bytes.Now-session.Started>30000)
         {
             session?.Handshake.Dispose();if(sessions.Count>=128&&!sessions.ContainsKey(peer))throw new InvalidOperationException("Noise session limit reached");sessions[peer]=session=new(true,noiseKey);

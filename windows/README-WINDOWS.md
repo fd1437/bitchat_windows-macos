@@ -244,3 +244,35 @@ remain. Progress means radio transmission; remote delivery is shown separately
 when the peer/protocol supports a receipt. Native diagnostics exercise multiple
 drafts and the visible progress controls. Physical Bluetooth reconnect, throughput
 and cross-device testing remain necessary.
+
+
+## Transfer queues and files-only mode (0.1.11)
+
+Press **Ctrl+Alt+C** in the application to toggle **files-only mode**. The choice
+is remembered. This mode lists Bluetooth correspondents and displays sent and
+received files, without the text composer, public channels, voice controls,
+reactions or notification reply input. Existing chat history remains stored and
+is visible again when returning to chat mode. Receiving protocol messages still
+runs in the background so authentication and delivery receipts keep working.
+
+Send snapshots the selected files into a separate transfer list immediately;
+they no longer remain in the draft. Each correspondent has an independent,
+ordered queue. A failed or canceled file does not stop the next one. Transfers
+show progress, Cancel, and Retry on failure. Retrying is explicit; new drafts are
+never sent automatically. Remove completed rows to release their in-memory data.
+
+Cancel stops at a complete Bluetooth protocol-frame boundary, preserving the
+connection for subsequent messages. An in-progress GATT operation can take up to
+its 30-second timeout. Cancellation removes the file's retained reconnect retry;
+it cannot erase bytes or a complete file already received by another device.
+The original peer protocol still limits each file to 1 MiB, and only compatible
+private images and voice notes have durable delivery receipts. A local 100%
+progress indicator is not proof of remote delivery.
+
+Private encrypted traffic prefers an authenticated direct route before mesh
+fallback, avoiding unrelated Bluetooth links for direct transfers. Incoming
+callbacks from a retired link epoch are ignored; route hints cannot reopen an
+expired connection. Connection maintenance survives individual errors, and new
+physical links renew stale Noise sessions without periodic rekeys on unchanged
+legacy links. Online dots reflect a live authenticated route, rather than just
+a remembered peer record. Physical Windows/Mac BLE testing is still required.

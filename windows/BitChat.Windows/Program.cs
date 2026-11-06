@@ -89,12 +89,15 @@ public sealed partial class MainWindow:Window
         var titleStack=new StackPanel();typingLabel.Foreground=muted;titleStack.Children.Add(title);titleStack.Children.Add(typingLabel);heading.Children.Add(titleStack);DockPanel.SetDock(heading,Dock.Top);main.Children.Add(heading);
         var bottom=new StackPanel();status.Foreground=muted;status.Margin=new Thickness(0,10,0,0);status.Text="/help for commands";bottom.Children.Add(status);DockPanel.SetDock(bottom,Dock.Bottom);main.Children.Add(bottom);
         var composer=CreateComposer();DockPanel.SetDock(composer,Dock.Bottom);main.Children.Add(composer);
+        DockPanel.SetDock(transferPanel,Dock.Bottom);main.Children.Add(transferPanel);
         scroll=new ScrollViewer{Content=messages,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};main.Children.Add(scroll);
         try{tray.Icon=System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!);}catch{}tray.DoubleClick+=(_,_)=>Ui(RestoreFromTray);
         var trayMenu=new System.Windows.Forms.ContextMenuStrip();
         trayMenu.Items.Add("Open BitChat",null,(_,_)=>Ui(RestoreFromTray));
         trayMenu.Items.Add("Quit BitChat",null,(_,_)=>Ui(async()=>await Quit()));tray.ContextMenuStrip=trayMenu;
-        Deactivated+=(_,_)=>_=controller.StopVoiceAutoplay();typingTimer.Tick+=(_,_)=>RefreshTypingLabel();typingTimer.Start();typingStopTimer.Tick+=(_,_)=>{typingStopTimer.Stop();SendTyping(false);};updateCheckTimer.Tick+=async(_,_)=>await CheckForUpdates();BindController();RefreshChannels();Select("mesh");if(!diagnostics)
+        Deactivated+=(_,_)=>_=controller.StopVoiceAutoplay();typingTimer.Tick+=(_,_)=>RefreshTypingLabel();typingTimer.Start();typingStopTimer.Tick+=(_,_)=>{typingStopTimer.Stop();SendTyping(false);};updateCheckTimer.Tick+=async(_,_)=>await CheckForUpdates();BindController();
+        PreviewKeyDown+=(_,e)=>{var key=e.Key==Key.System?e.SystemKey:e.Key;if(store.State.FilesOnly&&key==Key.V&&Keyboard.Modifiers==ModifierKeys.Control&&TryPasteAttachments()){e.Handled=true;return;}if(key==Key.C&&Keyboard.Modifiers==(ModifierKeys.Control|ModifierKeys.Alt)){e.Handled=true;store.State.FilesOnly=!store.State.FilesOnly;store.Save();ApplyFilesOnlyMode();Select(conversation);status.Text=store.State.FilesOnly?"Files only · Ctrl+Alt+C to restore chat":"Chat enabled · Ctrl+Alt+C for files only";}};
+        ApplyFilesOnlyMode();RefreshChannels();Select("mesh");if(!diagnostics)
         {
             bool started=false;
             Loaded+=async(_,_)=>
@@ -116,13 +119,14 @@ public sealed partial class MainWindow:Window
     internal async Task HandleNativeNotification(NotificationActivation action)
     {
         if(!store.State.Messages.Any(message=>message.Conversation==action.Conversation))return;
+        if(action.Action=="reply"&&store.State.FilesOnly){RestoreFromTray();Select(action.Conversation);status.Text="Files-only mode · Ctrl+Alt+C to enable chat replies";return;}
         if(action.Action=="reply"&&!string.IsNullOrWhiteSpace(action.Reply))
         {await controllerReady.Task;await Guard(()=>controller.Send(action.Conversation,action.Reply.Trim()));}
         else{RestoreFromTray();Select(action.Conversation);}
     }
     public void RestoreFromTray(){Show();WindowState=WindowState.Normal;Activate();}
     internal bool ShouldShowMessageNotification(StoredMessage message)
-        =>!message.Own&&store.State.Notifications&&(!IsVisible||!IsActive||WindowState==WindowState.Minimized||message.Conversation!=conversation);
+        =>!message.Own&&store.State.Notifications&&(!store.State.FilesOnly||message.Attachment!=null)&&(!IsVisible||!IsActive||WindowState==WindowState.Minimized||message.Conversation!=conversation);
     internal void VerifyNotificationVisibilityRouting()
     {
         store.State.Notifications=true;
@@ -152,7 +156,7 @@ public sealed partial class MainWindow:Window
     }
     private async Task Quit()
     {
-        if(closing)return;closing=true;
+        if(closing)return;closing=true;CancelTransfers();
         typingTimer.Stop();typingStopTimer.Stop();updateCheckTimer.Stop();SendTyping(false);updater?.Dispose();updater=null;
         try{await controller.DisposeAsync();}
         finally{tray.Visible=false;tray.Dispose();Application.Current.Shutdown();}
@@ -221,33 +225,44 @@ public sealed partial class MainWindow:Window
     {
         channels.Children.Clear();void Label(string s)=>channels.Children.Add(new TextBlock{Text=s,Foreground=muted,Margin=new Thickness(18,18,12,6),FontSize=10});
         void Channel(string id,string label){var b=Button(label,()=>Select(id));b.ToolTip=label;b.Content=new TextBlock{Text=label,TextTrimming=TextTrimming.CharacterEllipsis};b.HorizontalContentAlignment=HorizontalAlignment.Left;b.Padding=new Thickness(14,9,8,9);b.BorderThickness=new Thickness(id==conversation?1:0);channels.Children.Add(b);}
-        Label("CHANNELS");Channel("mesh","# bluetooth mesh");Channel("board","⌖ mesh board");
+        if(!store.State.FilesOnly)
+        {Label("CHANNELS");Channel("mesh","# bluetooth mesh");Channel("board","⌖ mesh board");
         if(Geohash.Valid(store.State.Cell)){Channel("geo:"+store.State.Cell,"# "+store.State.Cell);Channel("notes:"+store.State.Cell,"⌖ nearby notes");}
-        channels.Children.Add(Button("+ location channel",()=>JoinLocation()));Label("GROUPS");foreach(var g in store.State.Groups.Values)Channel(g.Conversation,"# "+g.Name);channels.Children.Add(Button("+ private group",CreateGroup));Label("NEARBY");
+        channels.Children.Add(Button("+ location channel",()=>JoinLocation()));Label("GROUPS");foreach(var g in store.State.Groups.Values)Channel(g.Conversation,"# "+g.Name);channels.Children.Add(Button("+ private group",CreateGroup));}
+        Label(store.State.FilesOnly?"FILE CORRESPONDENTS · CTRL+ALT+C":"NEARBY");
         foreach(var p in controller.Peers.Values.Where(p=>p.LastSeen>Bytes.Now-120000&&!store.State.Blocked.Contains(p.Id)).OrderBy(p=>p.Nickname))
-        {string favorite=store.State.Favorites.Contains(p.Id)?"★ ":"";string verified=store.State.Verified.ContainsKey(Bytes.Hex(Crypto.Hash(p.NoiseKey)))?"✓ ":"";string battery=p.BatteryPercent is byte value?$" · {value}% ⚡":"";Channel("mesh:"+p.Id,$"{favorite}{verified}{(p.Authenticated?"●":"○")} {p.Id}\n{IdentityNames.Display(p.Nickname)}{battery}");}
+        {string favorite=store.State.Favorites.Contains(p.Id)?"★ ":"";string verified=store.State.Verified.ContainsKey(Bytes.Hex(Crypto.Hash(p.NoiseKey)))?"✓ ":"";string battery=p.BatteryPercent is byte value?$" · {value}% ⚡":"";Channel("mesh:"+p.Id,$"{favorite}{verified}{(controller.Bluetooth.AuthenticatedFor(p.Id).Length>0?"●":"○")} {p.Id}\n{IdentityNames.Display(p.Nickname)}{battery}");}
         foreach(var recent in store.State.Messages.Where(m=>m.Conversation.StartsWith("mesh:")&&!store.State.Blocked.Contains(m.Conversation[5..]))
             .GroupBy(m=>m.Conversation).Select(g=>g.OrderByDescending(m=>m.Timestamp).First()).OrderByDescending(m=>m.Timestamp))
             if(!controller.Peers.TryGetValue(recent.Conversation[5..],out var live)||live.LastSeen<=Bytes.Now-120000)
                 Channel(recent.Conversation,"@ "+(store.State.NoiseContacts.GetValueOrDefault(recent.Conversation[5..])?.Nickname??store.State.KnownPeers.GetValueOrDefault(recent.Conversation[5..])?.Nickname??(!recent.Own?recent.Sender:recent.Conversation[5..13])));
-        Label("PRIVATE MESSAGES");foreach(var p in store.State.NostrPeers.Where(p=>!store.State.Blocked.Contains(p.Key)).OrderBy(p=>p.Value))Channel("nostr:"+p.Key,p.Key[..Math.Min(16,p.Key.Length)]+"\n@ "+IdentityNames.Display(p.Value));
-        channels.Children.Add(Button("+ Nostr contact",()=>NewContact()));
+        if(store.State.FilesOnly)foreach(var contact in store.State.NoiseContacts.Where(contact=>!store.State.Blocked.Contains(contact.Key)&&!controller.Peers.Values.Any(peer=>peer.Id==contact.Key&&peer.LastSeen>Bytes.Now-120000)&&!store.State.Messages.Any(m=>m.Conversation=="mesh:"+contact.Key)))Channel("mesh:"+contact.Key,contact.Key+"\n@ "+IdentityNames.Display(contact.Value.Nickname));
+        if(!store.State.FilesOnly){Label("PRIVATE MESSAGES");foreach(var p in store.State.NostrPeers.Where(p=>!store.State.Blocked.Contains(p.Key)).OrderBy(p=>p.Value))Channel("nostr:"+p.Key,p.Key[..Math.Min(16,p.Key.Length)]+"\n@ "+IdentityNames.Display(p.Value));
+        channels.Children.Add(Button("+ Nostr contact",()=>NewContact()));}
+    }
+    private static bool IsPrivateConversation(string id)=>id.StartsWith("mesh:",StringComparison.Ordinal);
+    private void ApplyFilesOnlyMode()
+    {
+        typingLabel.Visibility=store.State.FilesOnly?Visibility.Collapsed:Visibility.Visible;input.IsEnabled=!store.State.FilesOnly;if(composerTextArea!=null)composerTextArea.Visibility=store.State.FilesOnly?Visibility.Collapsed:Visibility.Visible;
+        if(composerTools!=null)foreach(UIElement control in composerTools.Children.Cast<UIElement>().Skip(1)){control.Visibility=store.State.FilesOnly?Visibility.Collapsed:Visibility.Visible;control.IsEnabled=!store.State.FilesOnly;}
     }
     private void Select(string id)
     {
+        if(store.State.FilesOnly&&!IsPrivateConversation(id)){string? recent=store.State.Messages.LastOrDefault(m=>IsPrivateConversation(m.Conversation)&&!store.State.Blocked.Contains(m.Conversation[5..]))?.Conversation;string? peer=controller.Peers.Keys.FirstOrDefault(p=>!store.State.Blocked.Contains(p));id=recent??(peer==null?"files":"mesh:"+peer);}
         SendTyping(false);typingStopTimer.Stop();activeTypingPeer=null;
-        conversation=id;RefreshDraft();title.Text=id switch{"mesh"=>"# bluetooth mesh","board"=>"⌖ mesh board",_ when id.StartsWith("mesh:")=>"@ "+(controller.Peers.GetValueOrDefault(id[5..])?.Nickname??id[5..]),_ when id.StartsWith("group:")=>"# "+store.State.Groups[id].Name,_ when id.StartsWith("nostr:")=>"@ "+store.State.NostrPeers.GetValueOrDefault(id[6..],id[6..8]),_ when id.StartsWith("notes:")=>"⌖ notes #"+id[6..],_=>"# "+id[4..]};
+        conversation=id;RefreshDraft();RefreshTransfers();title.Text=id switch{"files"=>"Files · choose a correspondent","mesh"=>"# bluetooth mesh","board"=>"⌖ mesh board",_ when id.StartsWith("mesh:")=>"@ "+(controller.Peers.GetValueOrDefault(id[5..])?.Nickname??id[5..]),_ when id.StartsWith("group:")=>"# "+store.State.Groups[id].Name,_ when id.StartsWith("nostr:")=>"@ "+store.State.NostrPeers.GetValueOrDefault(id[6..],id[6..8]),_ when id.StartsWith("notes:")=>"⌖ notes #"+id[6..],_=>"# "+id[4..]};
         if(id.StartsWith("mesh:"))title.Text=IdentityNames.Display(title.Text)+" · "+id[5..];
         if(id.StartsWith("nostr:"))title.Text=IdentityNames.Display(title.Text)+" · "+id[6..Math.Min(id.Length,22)];
         title.ToolTip="A nickname is not unique. Compare the peer ID and verify the fingerprint with the identity button.";
         if(filesButton!=null){int count=store.State.Messages.Count(m=>m.Conversation==id&&m.Mime!=null);filesButton.Content=$"files · {count}";filesButton.IsEnabled=count>0;}
-        messages.Children.Clear();receiptLabels.Clear();StoredMessage[] history;lock(store.State.Messages)history=store.State.Messages.Where(m=>m.Conversation==id).OrderBy(m=>m.Timestamp).TakeLast(500).ToArray();foreach(var m in history)Append(m);
-        if(history.Length==0)messages.Children.Add(new TextBlock{Text=id=="mesh"?"Messages travel through nearby devices over Bluetooth LE.\nChoose a location channel to chat over Nostr relays.":"No messages yet.",Foreground=muted,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,20,0,20)});
+        messages.Children.Clear();receiptLabels.Clear();StoredMessage[] history;lock(store.State.Messages)history=store.State.Messages.Where(m=>m.Conversation==id&&(!store.State.FilesOnly||m.Attachment!=null||m.LocalAttachmentDeleted)).OrderBy(m=>m.Timestamp).TakeLast(500).ToArray();foreach(var m in history)Append(m);
+        if(history.Length==0)messages.Children.Add(new TextBlock{Text=store.State.FilesOnly?"Files only · select a Bluetooth correspondent.\nReceived files and your sent files appear here.":id=="mesh"?"Messages travel through nearby devices over Bluetooth LE.\nChoose a location channel to chat over Nostr relays.":"No messages yet.",Foreground=muted,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,20,0,20)});
         foreach(var message in history.Where(m=>CanMarkRead(m)&&!m.Own&&m.Status!="read"&&m.Conversation.StartsWith("mesh:")))_=controller.MarkMeshRead(message);
-        RefreshChannels();RefreshTypingLabel();scroll.ScrollToEnd();input.Focus();
+        RefreshChannels();RefreshTypingLabel();scroll.ScrollToEnd();if(input.IsEnabled)input.Focus();
     }
     private void Append(StoredMessage m)
     {
+        if(store.State.FilesOnly&&m.Attachment==null&&!m.LocalAttachmentDeleted)return;
         var block=new StackPanel{Margin=new Thickness(0,8,0,10)};
         var header=new StackPanel{Orientation=Orientation.Horizontal};header.Children.Add(new TextBlock{Text=IdentityNames.Display(m.Sender),MaxWidth=160,TextTrimming=TextTrimming.CharacterEllipsis,ToolTip=IdentityNames.Display(m.Sender),Foreground=m.Own?green:Brushes.LightSkyBlue,FontWeight=FontWeights.SemiBold});
         string? senderId=m.Own?controller.Mesh.Id:m.Peer;
@@ -263,7 +278,7 @@ public sealed partial class MainWindow:Window
         var choices=new StackPanel{Orientation=Orientation.Horizontal};
         foreach(var group in store.State.Reactions.Where(r=>r.Conversation==m.Conversation&&r.MessageId==m.Id).GroupBy(r=>r.Emoji).OrderBy(g=>Array.IndexOf(ReactionOptions,g.Key)))
             choices.Children.Add(Button(group.Key+" "+group.Count(),async()=>await Guard(()=>controller.ToggleReaction(m,group.Key))));
-        var picker=Button("react…",()=>{});var menu=new ContextMenu();foreach(string emoji in ReactionOptions){var item=new MenuItem{Header=emoji};item.Click+=async(_,_)=>await Guard(()=>controller.ToggleReaction(m,emoji));menu.Items.Add(item);}picker.ContextMenu=menu;picker.Click+=(_,_)=>menu.IsOpen=true;choices.Children.Add(picker);foreach(Button reaction in choices.Children){reaction.MinHeight=24;reaction.Height=26;reaction.FontSize=11;reaction.Padding=new Thickness(8,3,8,3);}block.Children.Add(choices);
+        var picker=Button("react…",()=>{});var menu=new ContextMenu();foreach(string emoji in ReactionOptions){var item=new MenuItem{Header=emoji};item.Click+=async(_,_)=>await Guard(()=>controller.ToggleReaction(m,emoji));menu.Items.Add(item);}picker.ContextMenu=menu;picker.Click+=(_,_)=>menu.IsOpen=true;choices.Children.Add(picker);foreach(Button reaction in choices.Children){reaction.MinHeight=24;reaction.Height=26;reaction.FontSize=11;reaction.Padding=new Thickness(8,3,8,3);}if(!store.State.FilesOnly)block.Children.Add(choices);
         if(store.State.HackMode)messages.Children.Add(block);
         else
         {
@@ -302,7 +317,7 @@ public sealed partial class MainWindow:Window
         }
     }
     private void SystemMessage(string text)=>Append(new(conversation,Guid.NewGuid().ToString(),"system",text,Bytes.Now));
-    private async void ClearChat(){await Guard(async()=>{await controller.ClearConversation(conversation);Select(conversation);});}
+    private async void ClearChat(){string target=conversation;CancelTransfers(target);await Guard(async()=>{await controller.ClearConversation(target);Select(conversation);});}
     private async Task PlayAudio(StoredMessage message)
     {
         var bytes=store.ReadMedia(message.Attachment!);using var codec=AudioProcess.Start(["-i","pipe:0","-t","600","-f","s16le","-ar","16000","-ac","1","pipe:1"]);var errors=codec.StandardError.ReadToEndAsync();using var decoded=new MemoryStream();
@@ -346,6 +361,7 @@ public sealed partial class MainWindow:Window
         p.Children.Add(new TextBlock{Text="identity & connections",FontSize=22,Foreground=green,Margin=new Thickness(0,0,0,20)});
         var startupOption=new CheckBox{Content="Start BitChat when I sign in to Windows",IsChecked=StartupRegistration.Enabled,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(startupOption);
         p.Children.Add(new TextBlock{Text="Closing the window keeps BitChat connected in the notification area. Use its tray menu to quit.",TextWrapping=TextWrapping.Wrap,Foreground=muted,Margin=new Thickness(0,0,0,16)});
+        p.Children.Add(new TextBlock{Text="Ctrl+Alt+C · toggle files-only mode (Bluetooth correspondents)",Foreground=muted,TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,0,0,12)});
         var hackOption=new CheckBox{Content="Hack mode · use the original terminal-style interface",IsChecked=store.State.HackMode,Foreground=green,Margin=new Thickness(0,0,0,12)};p.Children.Add(hackOption);
         var lightOption=new CheckBox{Content="Use light theme",IsChecked=!store.State.Dark,Foreground=green,Margin=new Thickness(0,0,0,10)};p.Children.Add(lightOption);
         var batteryOption=new CheckBox{Content="Share my battery percentage with nearby BitChat users",IsChecked=store.State.ShareBattery,Foreground=green,Margin=new Thickness(0,0,0,12)};p.Children.Add(batteryOption);
@@ -372,6 +388,6 @@ public sealed partial class MainWindow:Window
     private async Task PanicTap()
     {
         long now=Bytes.Now;panicTaps=now-lastPanic<800?panicTaps+1:1;lastPanic=now;if(panicTaps<3)return;panicTaps=0;
-        await controller.DisposeAsync();store.Wipe();controller=new(store);BindController();Select("mesh");await Guard(()=>controller.Start());status.Text="Local identity and message history wiped";
+        CancelTransfers();transfers.Clear();draftStates.Clear();input.Clear();await controller.DisposeAsync();store.Wipe();controller=new(store);BindController();ApplyFilesOnlyMode();Select("mesh");await Guard(()=>controller.Start());status.Text="Local identity and message history wiped";
     }
 }

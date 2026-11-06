@@ -74,11 +74,11 @@ internal static class NativeNotifications
         };
         var timer=new System.Windows.Threading.DispatcherTimer{Interval=TimeSpan.FromSeconds(12)};timer.Tick+=(_,_)=>{timer.Stop();app.Shutdown();};timer.Start();
     }
-    internal static ToastContentBuilder BuildContent(string conversation,string sender,string text,Uri? image,bool hide)
+    internal static ToastContentBuilder BuildContent(string conversation,string sender,string text,Uri? image,bool hide,bool allowReply=true)
     {
         var builder=new ToastContentBuilder().AddArgument("conversation",conversation).AddArgument("action","view").AddText(hide?"BitChat":sender).AddText(hide?"New message":text);
         if(!hide&&image!=null)builder.AddInlineImage(image);
-        builder.AddInputTextBox("reply",placeHolderContent:"Write a reply").AddButton(new ToastButton().SetContent("Send").AddArgument("conversation",conversation).AddArgument("action","reply").SetTextBoxId("reply").SetBackgroundActivation());
+        if(allowReply)builder.AddInputTextBox("reply",placeHolderContent:"Write a reply").AddButton(new ToastButton().SetContent("Send").AddArgument("conversation",conversation).AddArgument("action","reply").SetTextBoxId("reply").SetBackgroundActivation());
         return builder;
     }
     internal static bool TryShow(StateStore store,StoredMessage message)
@@ -102,7 +102,7 @@ internal static class NativeNotifications
                 catch{}
             }
             string Tag(string text)=>Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..16];
-            BuildContent(message.Conversation,IdentityNames.SenderLabel(message.Sender,message.Peer),message.Text.Length>800?message.Text[..800]:message.Text,image,store.State.HideNotificationPreviews).Show(toast=>{toast.Tag=Tag(message.Id);toast.Group=Tag(message.Conversation);toast.ExpirationTime=DateTimeOffset.Now.AddDays(1);});
+            BuildContent(message.Conversation,IdentityNames.SenderLabel(message.Sender,message.Peer),message.Text.Length>800?message.Text[..800]:message.Text,image,store.State.HideNotificationPreviews,!store.State.FilesOnly).Show(toast=>{toast.Tag=Tag(message.Id);toast.Group=Tag(message.Conversation);toast.ExpirationTime=DateTimeOffset.Now.AddDays(1);});
             return true;
         }
         catch{return false;}

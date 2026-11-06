@@ -243,6 +243,8 @@ public sealed partial class MainWindow:Window
     private static bool IsPrivateConversation(string id)=>id.StartsWith("mesh:",StringComparison.Ordinal);
     private void ApplyFilesOnlyMode()
     {
+        if(store.State.FilesOnly&&controller.IsRecording){_=controller.EndVoice(true);if(recordButton!=null)recordButton.Content="●  Record";}
+        if(store.State.FilesOnly)_=controller.StopVoiceAutoplay();
         typingLabel.Visibility=store.State.FilesOnly?Visibility.Collapsed:Visibility.Visible;input.IsEnabled=!store.State.FilesOnly;if(composerTextArea!=null)composerTextArea.Visibility=store.State.FilesOnly?Visibility.Collapsed:Visibility.Visible;
         if(composerTools!=null)foreach(UIElement control in composerTools.Children.Cast<UIElement>().Skip(1)){control.Visibility=store.State.FilesOnly?Visibility.Collapsed:Visibility.Visible;control.IsEnabled=!store.State.FilesOnly;}
     }

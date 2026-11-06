@@ -121,7 +121,7 @@ public sealed partial class MeshEngine
     {
         foreach(var (id,item) in retainedMedia.ToArray())
             if(item.Cancellation.IsCancellationRequested||item.InFlight==0&&MediaClock()-item.Created>120000||IsBlocked(item.Peer))
-            {ReleaseRetainedMedia(id);MediaTransferStatus?.Invoke(item.Peer,id,"unconfirmed");}
+            {ReleaseRetainedMedia(id);MediaTransferStatus?.Invoke(item.Peer,id,item.Cancellation.IsCancellationRequested?"canceled":"unconfirmed");}
     }
     public async Task MaintainPrivateMedia()
     {await gate.WaitAsync();try{PruneMediaLocked();}finally{gate.Release();}}

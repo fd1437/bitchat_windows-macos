@@ -64,12 +64,12 @@ public sealed partial class AppController
         {
             if(voiceBursts.ContainsKey(key))return;if(voiceBursts.Count>=8)throw new InvalidDataException("Concurrent voice burst limit");
             var burst=new InboundBurst(peer,isPrivate?"mesh:"+peer:"mesh",packet.Burst);voiceBursts[key]=burst;
-            try{if(LiveVoicePolicy.CanAutoplay(Store.State.LiveVoice,IsAppActive())){burst.Playback=new VoicePlayback();voicePlaybacks.Add(burst.Playback);}}catch(Exception e){Status?.Invoke("Audio playback unavailable: "+e.Message);}Status?.Invoke("Live voice from "+(Peers.GetValueOrDefault(peer)?.Nickname??peer));return;
+            try{if(LiveVoicePolicy.CanAutoplay(Store.State.LiveVoice&&!Store.State.FilesOnly,IsAppActive())){burst.Playback=new VoicePlayback();voicePlaybacks.Add(burst.Playback);}}catch(Exception e){Status?.Invoke("Audio playback unavailable: "+e.Message);}Status?.Invoke("Live voice from "+(Peers.GetValueOrDefault(peer)?.Nickname??peer));return;
         }
         if(!voiceBursts.TryGetValue(key,out var active))return;
         if(packet.Flags==4){voiceBursts.Remove(key);if(active.Playback!=null){voicePlaybacks.Remove(active.Playback);_=active.Playback.DisposeAsync();}return;}
         if(packet.Flags==2){voiceBursts.Remove(key);_=FinishVoice(active);return;}
-        if(!LiveVoicePolicy.CanAutoplay(Store.State.LiveVoice,IsAppActive()))_=StopVoiceAutoplay();
+        if(!LiveVoicePolicy.CanAutoplay(Store.State.LiveVoice&&!Store.State.FilesOnly,IsAppActive()))_=StopVoiceAutoplay();
         var frames=packet.Frames();int size=frames.Sum(f=>f.Length+7);
         if(active.Size+size>384*1024||Bytes.Now-active.Started>130000){voiceBursts.Remove(key);if(active.Playback!=null){voicePlaybacks.Remove(active.Playback);_=active.Playback.DisposeAsync();}return;}
         if(!active.Frames.TryAdd(packet.Sequence,frames))return;active.Size+=size;

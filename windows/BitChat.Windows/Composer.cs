@@ -23,6 +23,7 @@ public sealed partial class MainWindow
     private readonly List<FileTransfer> transfers=[];
     private readonly CorrespondentSendQueue sendQueue=new();
     private readonly StackPanel transferRows=new();
+    private readonly Dictionary<FileTransfer,(TextBlock Label,ProgressBar Progress)> transferControls=[];
     private readonly ScrollViewer transferPanel=new(){MaxHeight=165,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,Visibility=Visibility.Collapsed};
     private readonly Dictionary<DraftAttachment,string> draftStates=[];
     private readonly Dictionary<DraftAttachment,TextBlock> draftLabels=[];
@@ -98,7 +99,7 @@ public sealed partial class MainWindow
     private string DraftLabel(DraftAttachment item)=>item.Media.Name+"\n"+(item.Media.Content.Length/1024d).ToString("0.#")+" KB · "+draftStates.GetValueOrDefault(item,"ready to send");
     private void RefreshTransfers()
     {
-        transferRows.Children.Clear();transferPanel.Content=transferRows;
+        transferRows.Children.Clear();transferControls.Clear();transferPanel.Content=transferRows;
         foreach(var item in transfers.Where(t=>t.Attachment.Conversation==conversation).ToArray())
         {
             var row=new DockPanel{Margin=new Thickness(4)};
@@ -110,8 +111,8 @@ public sealed partial class MainWindow
                 else{item.Stop.Cancel();item.State=item.State=="queued"?"canceled · this queued file will not be sent":"canceling after current Bluetooth frame…";}
                 RefreshTransfers();
             });DockPanel.SetDock(action,Dock.Right);row.Children.Add(action);
-            var details=new StackPanel();details.Children.Add(new TextBlock{Text=item.Attachment.Media.Name+" · "+item.State,Foreground=Foreground,TextTrimming=TextTrimming.CharacterEllipsis});
-            details.Children.Add(new ProgressBar{Minimum=0,Maximum=100,Value=item.Percent,Height=4,Margin=new Thickness(0,5,8,0)});row.Children.Add(details);transferRows.Children.Add(row);
+            var details=new StackPanel();var label=new TextBlock{Text=item.Attachment.Media.Name+" · "+item.State,Foreground=Foreground,TextTrimming=TextTrimming.CharacterEllipsis};details.Children.Add(label);
+            var progress=new ProgressBar{Minimum=0,Maximum=100,Value=item.Percent,Height=4,Margin=new Thickness(0,5,8,0)};details.Children.Add(progress);transferControls[item]=(label,progress);row.Children.Add(details);transferRows.Children.Add(row);
         }
         transferPanel.Visibility=transferRows.Children.Count==0?Visibility.Collapsed:Visibility.Visible;
     }
@@ -119,7 +120,7 @@ public sealed partial class MainWindow
     {
         if(receiptLabels.TryGetValue(progress.Id,out var receipt)&&store.State.Messages.Any(m=>m.Id==progress.Id&&m.Own&&m.Status=="sending"))receipt.Text=$"Sending {progress.Percent}%";
         var item=transfers.FirstOrDefault(t=>!t.Finished&&t.State.StartsWith("sending")&&t.Attachment.Conversation==progress.Conversation&&t.Attachment.Media.Name==progress.Name);
-        if(item==null||item.Stop.IsCancellationRequested)return;item.Percent=progress.Percent;item.State=$"sending {progress.Percent}%";RefreshTransfers();
+        if(item==null||item.Stop.IsCancellationRequested)return;item.Percent=progress.Percent;item.State=$"sending {progress.Percent}%";if(transferControls.TryGetValue(item,out var controls)){controls.Label.Text=item.Attachment.Media.Name+" · "+item.State;controls.Progress.Value=item.Percent;}
     }
     private void CancelTransfers(string? target=null)
     {
@@ -198,9 +199,10 @@ public sealed partial class MainWindow
     internal void VerifyFileProgress()
     {
         var attachment=new DraftAttachment(conversation,new("batch-test.txt","text/plain",Bytes.Utf8("synthetic transfer")));
-        var item=new FileTransfer(attachment){State="sending 0%"};transfers.Add(item);
+        var item=new FileTransfer(attachment){State="sending 0%"};transfers.Add(item);RefreshTransfers();
+        var row=transferRows.Children[0];
         ShowFileProgress(new(conversation,"diagnostic-progress",attachment.Media.Name,50));
-        if(item.Percent!=50||!item.State.Contains("50%")||transferRows.Children.Count!=1||draftAttachments.Contains(attachment))throw new InvalidOperationException("Transfer progress must be outside the draft");
+        if(!ReferenceEquals(row,transferRows.Children[0])||item.Percent!=50||!item.State.Contains("50%")||transferRows.Children.Count!=1||draftAttachments.Contains(attachment))throw new InvalidOperationException("Transfer progress must be outside the draft");
         item.Stop.Cancel();ShowFileProgress(new(conversation,"diagnostic-progress",attachment.Media.Name,90));
         if(item.Percent!=50)throw new InvalidOperationException("Canceled transfer accepted late progress");
         transfers.Remove(item);item.Stop.Dispose();RefreshTransfers();

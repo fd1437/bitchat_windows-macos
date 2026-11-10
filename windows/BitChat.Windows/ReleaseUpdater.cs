@@ -147,5 +147,6 @@ internal sealed class ReleaseUpdater(StateStore store,HttpMessageHandler? handle
         catch{}
     }
 
-    public void Dispose(){http.Dispose();gate.Dispose();}
+    // In-flight checks release the gate in finally after HTTP cancellation.
+    public void Dispose(){http.Dispose();}
 }

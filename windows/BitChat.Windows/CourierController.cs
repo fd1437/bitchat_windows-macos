@@ -15,6 +15,8 @@ public sealed record CarriedEnvelope(CourierEnvelope Envelope,string Depositor,l
 public sealed partial class AppController
 {
     private long lastPrekeys;private bool maintaining,depositing;
+    private readonly CorrespondentSendQueue privateTextQueue=new(4,256);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string,byte> privateAttempts=new();
     public async Task PublishPrekeys(bool force=false)
     {
         if(!force&&Bytes.Now-lastPrekeys<60000)return;
@@ -44,8 +46,22 @@ public sealed partial class AppController
     }
     private async Task AttemptPrivateNow(string peer,string id,string text)
     {
-        try{if(Bluetooth.Connections>0&&Peers.TryGetValue(peer,out var target)&&target.LastSeen>Bytes.Now-60000)await Mesh.SendPrivate(peer,text,id);}
+        string key=peer+":"+id;
+        if(disposed||!privateAttempts.TryAdd(key,0))return;
+        try
+        {
+            await privateTextQueue.Enqueue(peer,async cancellation=>
+            {
+                cancellation.ThrowIfCancellationRequested();
+                var pending=Store.State.Outbox.FirstOrDefault(item=>item.Peer==peer&&item.Id==id);
+                if(disposed||pending==null)return;
+                if(Bluetooth.Connections>0&&Peers.TryGetValue(peer,out var target)&&target.LastSeen>Bytes.Now-60000)
+                {pending.LastAttempt=Bytes.Now;await Mesh.SendPrivate(peer,text,id);}
+            });
+        }
+        catch(OperationCanceledException) when(disposed){}
         catch(Exception error){Status?.Invoke("Private send to "+peer+": "+error.Message);}
+        finally{privateAttempts.TryRemove(key,out _);}
     }
     private async Task DepositOutbox()
     {
@@ -60,7 +76,7 @@ public sealed partial class AppController
             if(Bytes.Now-pending.Created>86400000){UpdateReceipt(pending.Id,"expired");Store.State.Outbox.Remove(pending);continue;}
             var recipient=Peers.GetValueOrDefault(pending.Peer);byte[]? recipientKey=recipient?.NoiseKey??Store.State.NoiseContacts.GetValueOrDefault(pending.Peer)?.Key;if(recipientKey==null)continue;
             DepositBridgeDrop(pending,recipientKey);
-            if(recipient!=null&&recipient.LastSeen>Bytes.Now-60000&&Bytes.Now-pending.LastAttempt>30000){pending.LastAttempt=Bytes.Now;await Mesh.SendPrivate(pending.Peer,pending.Text,pending.Id);}
+            if(recipient!=null&&recipient.LastSeen>Bytes.Now-60000&&Bytes.Now-pending.LastAttempt>30000){pending.LastAttempt=Bytes.Now;await AttemptPrivateNow(pending.Peer,pending.Id,pending.Text);}
             if(couriers.Length==0)continue;
             pending.Envelope??=SealPending(pending,recipientKey,false);
             foreach(var courier in couriers.Where(p=>p.Id!=pending.Peer&&!pending.DepositedTo.Contains(p.Id)))

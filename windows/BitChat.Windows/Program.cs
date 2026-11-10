@@ -63,7 +63,7 @@ public sealed partial class MainWindow:Window
     private bool updating;
     private readonly TaskCompletionSource<bool> controllerReady=new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly bool installLatestOnLaunch;
-    private long lastPanic;private int panicTaps;private bool closing;
+    private long lastPanic;private int panicTaps;private bool closing,windowClosed,trayDisposed;private Task? shutdownTask;
     private readonly System.Windows.Forms.NotifyIcon tray=new(){Text="BitChat",Visible=true};
     public MainWindow(StateStore store,bool diagnostics=false,bool background=false,bool installLatest=false)
     {
@@ -115,16 +115,22 @@ public sealed partial class MainWindow:Window
             };
         }
         Closing+=(_,e)=>{if(closing)return;e.Cancel=true;Hide();};
+        Closed+=(_,_)=>{windowClosed=true;_=Quit();};
     }
     internal async Task HandleNativeNotification(NotificationActivation action)
     {
-        if(!store.State.Messages.Any(message=>message.Conversation==action.Conversation))return;
+        if(closing||windowClosed||!store.State.Messages.Any(message=>message.Conversation==action.Conversation))return;
         if(action.Action=="reply"&&store.State.FilesOnly){RestoreFromTray();Select(action.Conversation);status.Text="Files-only mode · Ctrl+Alt+C to enable chat replies";return;}
         if(action.Action=="reply"&&!string.IsNullOrWhiteSpace(action.Reply))
         {await controllerReady.Task;await Guard(()=>controller.Send(action.Conversation,action.Reply.Trim()));}
         else{RestoreFromTray();Select(action.Conversation);}
     }
-    public void RestoreFromTray(){Show();WindowState=WindowState.Normal;Activate();}
+    public void RestoreFromTray()
+    {
+        if(!Dispatcher.CheckAccess()){Ui(RestoreFromTray);return;}
+        if(closing||windowClosed||Dispatcher.HasShutdownStarted||Dispatcher.HasShutdownFinished)return;
+        Show();if(WindowState==WindowState.Minimized)WindowState=WindowState.Normal;Activate();
+    }
     internal bool ShouldShowMessageNotification(StoredMessage message)
         =>!message.Own&&store.State.Notifications&&(!store.State.FilesOnly||message.Attachment!=null)&&(!IsVisible||!IsActive||WindowState==WindowState.Minimized||message.Conversation!=conversation);
     internal void VerifyNotificationVisibilityRouting()
@@ -154,15 +160,39 @@ public sealed partial class MainWindow:Window
         if(IsVisible)throw new InvalidOperationException("Close button did not hide BitChat to the notification area");
         RestoreFromTray();
     }
-    private async Task Quit()
+    private void BeginShutdown()
     {
-        if(closing)return;closing=true;CancelTransfers();
-        typingTimer.Stop();typingStopTimer.Stop();updateCheckTimer.Stop();SendTyping(false);updater?.Dispose();updater=null;
-        try{await controller.DisposeAsync();}
-        finally{tray.Visible=false;tray.Dispose();Application.Current.Shutdown();}
+        closing=true;
+        typingTimer.Stop();typingStopTimer.Stop();updateCheckTimer.Stop();
+        if(!trayDisposed){trayDisposed=true;tray.Visible=false;tray.ContextMenuStrip?.Dispose();tray.Dispose();}
     }
-    public void EndWindowsSession(){closing=true;typingTimer.Stop();typingStopTimer.Stop();updateCheckTimer.Stop();tray.Visible=false;tray.Dispose();updater?.Dispose();_=controller.DisposeAsync();}
-    public async Task ShutdownDiagnostics(){closing=true;typingTimer.Stop();typingStopTimer.Stop();updateCheckTimer.Stop();updater?.Dispose();await controller.DisposeAsync();tray.Visible=false;tray.Dispose();}
+    private Task Quit()
+    {
+        if(shutdownTask!=null)return shutdownTask;
+        BeginShutdown();CancelTransfers();updater?.Dispose();updater=null;
+        return shutdownTask=FinishShutdown();
+    }
+    private async Task FinishShutdown()
+    {
+        try{await Task.WhenAll(sendQueue.StopAsync(),controller.DisposeAsync().AsTask()).WaitAsync(TimeSpan.FromSeconds(15));}
+        catch(Exception error){System.Diagnostics.Trace.TraceWarning("BitChat shutdown: "+error.Message);}
+        finally{Application.Current?.Shutdown();}
+    }
+    public void EndWindowsSession(){_=Quit();}
+    public async Task ShutdownDiagnostics()
+    {
+        BeginShutdown();updater?.Dispose();updater=null;
+        await Task.WhenAll(sendQueue.StopAsync(),controller.DisposeAsync().AsTask()).WaitAsync(TimeSpan.FromSeconds(15));
+    }
+    internal void VerifyRestoreDuringShutdown()
+    {
+        Hide();closing=true;RestoreFromTray();
+        if(IsVisible)throw new InvalidOperationException("A shutdown window was restored from a stale tray callback");
+        closing=false;windowClosed=true;RestoreFromTray();
+        if(IsVisible)throw new InvalidOperationException("A closed window accepted a stale activation");
+        windowClosed=false;RestoreFromTray();
+        if(!IsVisible)throw new InvalidOperationException("A hidden running window did not restore");
+    }
     private void ApplyThemeColors()
     {
         bool dark=store.State.Dark,hack=store.State.HackMode;
@@ -208,7 +238,12 @@ public sealed partial class MainWindow:Window
     {if(node is TextBox textBox)textBox.Foreground=Foreground;for(int i=0;i<VisualTreeHelper.GetChildrenCount(node);i++)RefreshTextBoxes(VisualTreeHelper.GetChild(node,i));}
     private Button Button(string text,Action action)
     {var b=new Button{Content=text,Background=panel,Foreground=green,BorderBrush=new SolidColorBrush(Color.FromRgb(48,63,70)),MinHeight=36,Padding=new Thickness(12,7,12,7),Margin=new Thickness(4),Cursor=Cursors.Hand};b.Click+=(_,_)=>action();return b;}
-    private void Ui(Action action){if(Dispatcher.CheckAccess())action();else Dispatcher.BeginInvoke(action);}
+    private void Ui(Action action)
+    {
+        if(Dispatcher.HasShutdownStarted||Dispatcher.HasShutdownFinished)return;
+        void Run(){if(!closing&&!windowClosed)action();}
+        if(Dispatcher.CheckAccess())Run();else Dispatcher.BeginInvoke(new Action(Run));
+    }
     private void BindController()
     {
         controller.FileProgress+=progress=>Ui(()=>ShowFileProgress(progress));

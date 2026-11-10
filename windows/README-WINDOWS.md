@@ -276,3 +276,24 @@ expired connection. Connection maintenance survives individual errors, and new
 physical links renew stale Noise sessions without periodic rekeys on unchanged
 legacy links. Online dots reflect a live authenticated route, rather than just
 a remembered peer record. Physical Windows/Mac BLE testing is still required.
+
+## Shutdown and concurrent sends (0.1.12)
+
+Shutdown removes the tray icon and disables late activation callbacks before
+waiting for network cleanup. Restoring a closing or permanently closed WPF
+window is ignored. Cleanup is bounded to 15 seconds so an update helper waiting
+for the old process can proceed. Pending media acceptance is canceled without
+acknowledging an uncommitted file when the UI dispatcher stops.
+
+The transfer scheduler runs at most two file sends across correspondents, keeps
+FIFO order within each correspondent, and bounds accepted work. Canceling a
+queued file removes it immediately. An active transfer retains its slot until
+its current complete Bluetooth frame has finished; a peripheral frame has one
+30-second deadline shared by all of its ATT chunks. Overflow is reported rather
+than silently dropping an accepted file. Small private messages use a separate
+ordered queue with a per-message in-flight guard, including background retries.
+
+Reconnection cannot start another retained-media retry or rekey that retained
+file while it is already transmitting. Progress updates change the existing
+label and bar, preserving the Cancel button while a user clicks it. Network
+hardware reliability still requires testing with the actual Bluetooth adapters.

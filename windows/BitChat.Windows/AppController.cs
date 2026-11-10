@@ -297,5 +297,5 @@ public sealed partial class AppController:IAsyncDisposable
         }
         catch(Exception e)when(e is InvalidDataException or CryptographicException or ArgumentException or InvalidOperationException or KeyNotFoundException or OverflowException or System.Text.Json.JsonException){Status?.Invoke("Rejected group payload: "+e.Message);}
     }
-    public async ValueTask DisposeAsync(){if(disposed)return;disposed=true;bridgeCourier.SetEnabled(false);stop.Cancel();Bluetooth.Dispose();await DisposeVoice();if(maintenance!=null)try{await maintenance;}catch(OperationCanceledException){}await Relays.DisposeAsync();if(tor!=null)await tor.DisposeAsync();await Mesh.DisposeAsync();stop.Dispose();}
+    public async ValueTask DisposeAsync(){if(disposed)return;disposed=true;var textDrain=privateTextQueue.StopAsync();bridgeCourier.SetEnabled(false);stop.Cancel();Bluetooth.Dispose();await DisposeVoice();if(maintenance!=null)try{await maintenance;}catch(OperationCanceledException){}await Relays.DisposeAsync();if(tor!=null)await tor.DisposeAsync();await textDrain;await Mesh.DisposeAsync();stop.Dispose();}
 }

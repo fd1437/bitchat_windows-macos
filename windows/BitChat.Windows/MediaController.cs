@@ -34,9 +34,11 @@ public sealed partial class AppController
     private static byte[] ProtectMediaDecision(byte[] data)=>ProtectedData.Protect(data,null,DataProtectionScope.CurrentUser);
     private static byte[] UnprotectMediaDecision(byte[] data)=>ProtectedData.Unprotect(data,null,DataProtectionScope.CurrentUser);
 
-    private Task<bool> AcceptMedia(string peer,string id,MediaPacket media)
+    private async Task<bool> AcceptMedia(string peer,string id,MediaPacket media)
     {
+        if(disposed)return false;
         var completion=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancellation=stop.Token.Register(()=>completion.TrySetResult(false));
         Dispatch(()=>
         {
             if(disposed||Store.State.Blocked.Contains(peer)){completion.TrySetResult(false);return;}
@@ -50,7 +52,7 @@ public sealed partial class AppController
             }
             catch(Exception e){Status?.Invoke("Private media was not acknowledged: "+e.Message);completion.TrySetResult(false);}
         });
-        return completion.Task;
+        return await completion.Task;
     }
     private void DeliverStoredMedia(string peer,string conversation,string id,string saved,string name,string mime)
     {

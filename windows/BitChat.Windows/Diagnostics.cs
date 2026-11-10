@@ -89,6 +89,20 @@ public static class Diagnostics
             }
             finally{StateStore.OverrideRoot=prior;if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
         });
+        await Check("Shutdown releases pending media acceptance",async()=>
+        {
+            string temporary=Path.Combine(Path.GetDirectoryName(reportPath)!,"bitchat-shutdown-diagnostic-"+Guid.NewGuid().ToString("N"));string? prior=StateStore.OverrideRoot;StateStore.OverrideRoot=temporary;
+            try
+            {
+                var controller=new AppController(new StateStore());controller.Dispatch=_=>{};
+                Task<bool> pending=controller.Mesh.AcceptPrivateMedia!("synthetic-peer","media-shutdown",new("test.bin","application/octet-stream",[1]));
+                if(pending.IsCompleted)throw new InvalidOperationException("Media acceptance did not wait for the dispatcher");
+                await controller.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+                if(await pending.WaitAsync(TimeSpan.FromSeconds(2)))throw new InvalidOperationException("Uncommitted media was acknowledged during shutdown");
+                return "missing UI callback cannot hold shutdown or falsely acknowledge a file";
+            }
+            finally{StateStore.OverrideRoot=prior;if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
+        });
         await Check("Native Windows notification registration",()=>Task.FromResult<object>(NativeNotifications.ProbeRegistration()));
         await Check("Windows DPAPI",()=>{var clear=RandomNumberGenerator.GetBytes(32);var encrypted=ProtectedData.Protect(clear,null,DataProtectionScope.CurrentUser);if(!ProtectedData.Unprotect(encrypted,null,DataProtectionScope.CurrentUser).SequenceEqual(clear))throw new CryptographicException("DPAPI roundtrip failed");return Task.FromResult<object>("per-user encryption works");});
         await Check("Durable private media (DPAPI)",()=>
@@ -192,7 +206,7 @@ public static class Diagnostics
         try
         {
             window=new MainWindow(new StateStore(),true);
-            window.Show();window.VerifyNotificationVisibilityRouting();window.VerifyWindowControls();window.Close();
+            window.Show();window.VerifyNotificationVisibilityRouting();window.VerifyWindowControls();window.VerifyRestoreDuringShutdown();window.Close();
             if(window.IsVisible)throw new InvalidOperationException("Closing must hide the window");
             window.RestoreFromTray();
             if(!window.IsVisible)throw new InvalidOperationException("Tray restore must reopen the same window");
@@ -206,6 +220,6 @@ public static class Diagnostics
             var render=new RenderTargetBitmap(1120,780,96,96,PixelFormats.Pbgra32);render.Render(content);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(render));using(var stream=File.Create(path))encoder.Save(stream);
             window.SetDiagnosticHackMode();content.UpdateLayout();var hackRender=new RenderTargetBitmap(1120,780,96,96,PixelFormats.Pbgra32);hackRender.Render(content);var hackEncoder=new PngBitmapEncoder();hackEncoder.Frames.Add(BitmapFrame.Create(hackRender));using(var hackFile=File.Create(Path.ChangeExtension(path,"hack.png")))hackEncoder.Save(hackFile);
         }
-        finally{if(window!=null){await window.ShutdownDiagnostics();window.Close();}StateStore.OverrideRoot=null;if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
+        finally{if(window!=null){await window.ShutdownDiagnostics();window.Close();window.RestoreFromTray();if(window.IsVisible)throw new InvalidOperationException("A permanently closed diagnostic window was reopened");}StateStore.OverrideRoot=null;if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
     }
 }

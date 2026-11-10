@@ -58,7 +58,9 @@ internal static class IdentityAndTransferTests
         int expired=0;pc.MediaTransferStatus+=(_,_,status)=>{if(status=="unconfirmed")expired++;};long mediaNow=Bytes.Now;pc.MediaClock=()=>mediaNow;
         blockFile=true;var sending=pc.SendMedia(new("img_"+Guid.NewGuid().ToString("D")+".jpg","application/octet-stream",RandomNumberGenerator.GetBytes(8192)),victim.Id);
         await radioEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));bool controlResponsive=false;
-        try{await pc.Announce().WaitAsync(TimeSpan.FromSeconds(2));mediaNow+=180000;await pc.MaintainPrivateMedia().WaitAsync(TimeSpan.FromSeconds(2));controlResponsive=true;}
+        try{int beforeReconnect=transit.Count;await pc.PeerLinkReady(victim.Id,Guid.NewGuid()).WaitAsync(TimeSpan.FromSeconds(2));
+            check(transit.Count==beforeReconnect,"A new physical route cannot rekey or duplicate an already active file transfer");
+            await pc.Announce().WaitAsync(TimeSpan.FromSeconds(2));mediaNow+=180000;await pc.MaintainPrivateMedia().WaitAsync(TimeSpan.FromSeconds(2));controlResponsive=true;}
         finally{radioRelease.TrySetResult(true);await sending;}
         check(controlResponsive,"A stalled file write does not hold the mesh identity/receive gate");
         check(expired==0,"An actively transmitting file does not expire its reconnect retry state after two minutes");await Pump();

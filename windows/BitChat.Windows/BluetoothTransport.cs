@@ -164,6 +164,7 @@ public sealed class BluetoothTransport:IDisposable
                 await link.Gate.WaitAsync(cancellation);
                 try
                 {
+                cancellation.ThrowIfCancellationRequested();if(link.Retired!=0||stillValid!=null&&!stillValid())return false;
                 var encoded=frame.Bytes;GattCommunicationStatus status;
                 using var deadline=CancellationTokenSource.CreateLinkedTokenSource(stop.Token);deadline.CancelAfter(TimeSpan.FromSeconds(30));
                 try
@@ -202,10 +203,11 @@ public sealed class BluetoothTransport:IDisposable
                 cancellation.ThrowIfCancellationRequested();await clientGate.WaitAsync(cancellation);
                 try
                 {
+                cancellation.ThrowIfCancellationRequested();
+                using var deadline=CancellationTokenSource.CreateLinkedTokenSource(stop.Token);deadline.CancelAfter(TimeSpan.FromSeconds(30));
                 foreach(var bytes in BleFraming.Chunks(encoded,mtu))
                 {
                     if(!Valid())return false;
-                    using var deadline=CancellationTokenSource.CreateLinkedTokenSource(stop.Token);deadline.CancelAfter(TimeSpan.FromSeconds(30));
                     GattClientNotificationResult result;
                     try{result=await local!.NotifyValueAsync(Buffer(bytes),client).AsTask(deadline.Token);}
                     catch(OperationCanceledException) when(!stop.IsCancellationRequested){throw new TimeoutException("Bluetooth notification frame timed out");}

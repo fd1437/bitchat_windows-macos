@@ -135,6 +135,10 @@ public sealed partial class MeshEngine
         await gate.WaitAsync();
         try
         {
+            // Do not replace keys or schedule a duplicate retry while this peer's
+            // current file is on the wire. Leave the epoch unobserved so a
+            // subsequent announcement can retry after the active send finishes.
+            if(retainedMedia.Values.Any(item=>item.Peer==peer&&item.InFlight>0))return;
             string linkKey=peer+":"+linkEpoch.ToString("N");if(!observedMediaLinks.Add(linkKey))return;
             observedMediaLinkOrder.Enqueue(linkKey);while(observedMediaLinkOrder.Count>1024)observedMediaLinks.Remove(observedMediaLinkOrder.Dequeue());
             mediaLinkEpochs[peer]=linkEpoch;
@@ -178,7 +182,7 @@ public sealed partial class MeshEngine
         foreach(var (id,item) in retainedMedia.Where(p=>p.Value.Peer==peer).OrderBy(p=>p.Value.Created).ThenBy(p=>p.Key).ToArray())
         {
             if(count>=2)break;
-            if(item.Retries>=2||!newAuthentication&&item.LastLinkEpoch==epoch||newAuthentication&&item.Generation==session.Generation)continue;
+            if(item.InFlight>0||item.Retries>=2||!newAuthentication&&item.LastLinkEpoch==epoch||newAuthentication&&item.Generation==session.Generation)continue;
             item.LastLinkEpoch=epoch;item.Generation=session.Generation;item.Retries++;item.Created=MediaClock();count++;
             mediaRetryBudgets[budgetKey]=count;
             item.InFlight++;deferredMediaPackets.Enqueue((peer,id,item.Media.Name,MediaPacketOnSessionLocked(peer,item.Media.Encode(),session)));

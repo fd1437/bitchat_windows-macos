@@ -169,14 +169,15 @@ public sealed partial class MainWindow:Window
     private Task Quit()
     {
         if(shutdownTask!=null)return shutdownTask;
+        var completion=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);shutdownTask=completion.Task;
         BeginShutdown();CancelTransfers();updater?.Dispose();updater=null;
-        return shutdownTask=FinishShutdown();
+        _=FinishShutdown(completion);return shutdownTask;
     }
-    private async Task FinishShutdown()
+    private async Task FinishShutdown(TaskCompletionSource completion)
     {
         try{await Task.WhenAll(sendQueue.StopAsync(),controller.DisposeAsync().AsTask()).WaitAsync(TimeSpan.FromSeconds(15));}
         catch(Exception error){System.Diagnostics.Trace.TraceWarning("BitChat shutdown: "+error.Message);}
-        finally{Application.Current?.Shutdown();}
+        finally{completion.TrySetResult();Application.Current?.Shutdown();}
     }
     public void EndWindowsSession(){_=Quit();}
     public async Task ShutdownDiagnostics()
